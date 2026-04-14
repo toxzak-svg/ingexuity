@@ -1,12 +1,6 @@
-FROM julia:1.10-slim
+FROM julia:1.10
 
 WORKDIR /root
-
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    curl \
-    git \
-    && rm -rf /var/lib/apt/lists/*
 
 # Copy Project.toml
 COPY Project.toml .
