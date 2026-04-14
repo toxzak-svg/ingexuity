@@ -10,10 +10,9 @@ RUN julia --project=. -e 'using Pkg; Pkg.instantiate()'
 
 # Copy source
 COPY src/ src/
-COPY genie/ genie/
 
 # Precompile the package
-RUN julia --project=. -e 'using IngExuity; using Genie'
+RUN julia --project=. -e 'using IngExuity'
 
 EXPOSE 8000
 
