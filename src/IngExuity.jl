@@ -160,8 +160,8 @@ to_json(d::Dict) = json_value(d)
 function handle_request(req::HTTP.Request)::HTTP.Response
     target = req.target
 
-    if target == "/health"
-        return HTTP.Response(200, "ok")
+    if startswith(target, "/health")
+        return HTTP.Response(200, ["Content-Type" => "text/plain"], "ok")
     elseif target == "/api/chat" && HTTP.method(req) == "POST"
         body = String(req.body)
         m = match(r"\"message\"\s*:\s*\"([^\"]+)\"", body)
