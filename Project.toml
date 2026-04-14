@@ -6,6 +6,8 @@ julia = "1.10"
 
 [deps]
 HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
+Dates = "b77e0a4c-0c8b-11e6-a4e8-8f3a5ca6f6c4"
 
 [compat]
 HTTP = "1"
+Dates = "1"
