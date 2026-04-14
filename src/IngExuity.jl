@@ -231,6 +231,15 @@ updateStats();
 </html>
 """
 
-start() = HTTP.serve(handle_request, "0.0.0.0", 8000)
+function server_port()
+    port_str = get(ENV, "PORT", "8000")
+    try
+        parse(Int, port_str)
+    catch
+        8000
+    end
+end
+
+start() = HTTP.serve(handle_request, "0.0.0.0", server_port())
 
 end # module

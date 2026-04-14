@@ -2,6 +2,8 @@ FROM julia:1.10
 
 WORKDIR /root
 
+ENV PORT=8000
+
 # Copy Project.toml
 COPY Project.toml .
 
