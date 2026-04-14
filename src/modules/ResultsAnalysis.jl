@@ -1,38 +1,17 @@
 # ============================================================================
-# ResultsAnalysis.jl — Input Layer: process outcomes, update feedback loop
+# ResultsAnalysis.jl — Analyze conversation results and turn state
 # ============================================================================
 module ResultsAnalysis
 
-using ...Types
+export process
 
-"""Process human input and update feedback from previous turns"""
-function process(
-    input::HumanInput,
-    state::ConversationState
-)::Dict{Symbol, Any}
-    # Analyze the input for feedback signals
-    Dict{Symbol, Any}(
-        :turn_count => state.turn_count,
-        :feedback_signal => analyze_feedback(input),
-        :engagement_level => estimate_engagement(input)
+function process(human_input, conversation_state)
+    # v1: minimal analysis — just track turn count and context
+    Dict(
+        :turn => conversation_state.turn_count,
+        :context_length => length(conversation_state.active_context),
+        :has_meaning => length(human_input.raw) > 0
     )
-end
-
-function analyze_feedback(input::HumanInput)::Symbol
-    raw = lowercase(input.raw)
-    if contains(raw, "thanks") || contains(raw, "great") || contains(raw, "perfect")
-        return :positive
-    elseif contains(raw, "wrong") || contains(raw, "stupid") || contains(raw, "bad")
-        return :negative
-    elseif contains(raw, "okay") || contains(raw, "sure") || contains(raw, "ok")
-        return :neutral
-    else
-        return :neutral
-    end
-end
-
-function estimate_engagement(input::HumanInput)::Float64
-    min(1.0, length(input.raw) / 100.0 + 0.3)
 end
 
 end # module

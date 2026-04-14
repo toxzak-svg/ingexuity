@@ -1,95 +1,60 @@
 # ============================================================================
-# InternalEmotional.jl — Cognitive: affective state of the conversation
+# InternalEmotional.jl — IngEnuity's internal emotional state
 # ============================================================================
 module InternalEmotional
 
-using ...Types
+export update, should_stay_present, advance_stay
 
-"""Update internal emotional state from input and comprehension"""
-function update(
-    state::InternalEmotional,
-    input::HumanInput,
-    comprehension::Dict{Symbol, Any}
-)::InternalEmotional
-    sentiment = comprehension[:sentiment]::Float64
-    emotional_charge = comprehension[:emotional_charge]::Float64
+function update(internal::InternalEmotional, human_input, comprehension)::InternalEmotional
+    raw = human_input.raw
+    words = split(lowercase(raw))
 
-    # Update valence (positive/negative) — EMA with momentum
-    new_valence = 0.85 * state.valence + 0.15 * sentiment
+    # Update valence (positive/negative sentiment)
+    neg_words = ["sad", "angry", "frustrated", "depressed", "stuck", "worried", "stressed", "terrible"]
+    pos_words = ["happy", "great", "awesome", "love", "excited", "wonderful", "fantastic"]
+    valence = any(w in words for w in neg_words) ? -0.6 :
+              any(w in words for w in pos_words) ? 0.6 : 0.0
 
-    # Update arousal from emotional charge
-    new_arousal = 0.75 * state.arousal + 0.25 * emotional_charge
+    # Update arousal (energy/engagement level)
+    raw_len = length(raw)
+    arousal = raw_len > 100 ? 0.8 : raw_len > 20 ? 0.5 : 0.2
 
-    # Stress: rises with negative sentiment, slowly decays
-    if sentiment < -0.3
-        new_stress = min(1.0, state.stress_level + 0.12)
-    elseif emotional_charge > 0.6
-        new_stress = min(1.0, state.stress_level + 0.05)
-    else
-        new_stress = max(0.0, state.stress_level - 0.03)
-    end
+    # Update stress
+    stress_words = ["stuck", "can't", "impossible", "overwhelmed", "stress", "panic"]
+    stress_level = any(w in words for w in stress_words) ? 0.8 : 0.0
 
-    # New: emotional charge tracked separately (not just arousal)
-    new_emotional_charge = 0.7 * state.emotional_charge + 0.3 * emotional_charge
+    # Update emotional charge
+    emotional_charge = abs(valence) * arousal
 
-    # PRESENCING CHECK: should we stay with this emotional moment before solving?
-    # High stress OR high emotional charge OR negative valence → stay present first
-    should_stay = (
-        new_stress > 0.6 ||
-        new_emotional_charge > 0.7 ||
-        new_valence < -0.3
-    )
+    # Determine affective state
+    affective = valence < -0.3 ? "concerned" :
+                valence > 0.3 ? "warm" :
+                stress_level > 0.5 ? "anxious" : "neutral"
 
-    # Affective summary
-    affective = if new_valence > 0.5 && new_arousal > 0.6
-        "positive and engaged"
-    elseif new_valence < -0.3
-        "negative — offer support"
-    elseif new_stress > 0.6
-        "stressed — stay present before solving"
-    elseif new_emotional_charge > 0.7
-        "emotionally charged — acknowledge first"
-    else
-        "neutral"
-    end
+    # Should we stay present? (empathy first — don't solve immediately)
+    should_stay = stress_level > 0.6 || emotional_charge > 0.7 || valence < -0.3
 
-    InternalEmotional(
-        new_valence, new_arousal, new_stress,
-        new_emotional_charge, affective, should_stay
-    )
+    internal.valence = valence
+    internal.arousal = arousal
+    internal.stress_level = stress_level
+    internal.emotional_charge = emotional_charge
+    internal.affective_state = affective
+    internal.should_stay_present = should_stay
+
+    internal
 end
 
-"""Check if system should stay present before solving"""
-function should_stay_present(state::InternalEmotional)::Bool
-    state.should_stay_present
+function should_stay_present(internal::InternalEmotional)::Bool
+    internal.should_stay_present
 end
 
-"""Advance stay-present counter — call between turns"""
-function advance_stay(state::InternalEmotional, user_model::UserModel)::Tuple{InternalEmotional, UserModel}
-    new_stay_turns = state.should_stay_present ? 1 : 0
-    updated_model = user_model
-
-    if new_stay_turns > 0
-        # Record that we stayed present — user is learning to trust this
-        patterns = Dict{String, Any}(copy(user_model.emotional_patterns))
-        patterns["times_stayed_present"] = get(patterns, "times_stayed_present", 0) + 1
-        updated_model = UserModel(
-            user_model.name,
-            user_model.communication_style,
-            user_model.topics,
-            user_model.temporal_patterns,
-            user_model.prediction_confidence,
-            patterns
-        )
-    end
-
-    # Reset stay_present flag — it's per-turn, not persistent
-    new_state = InternalEmotional(
-        state.valence, state.arousal, state.stress_level,
-        state.emotional_charge, state.affective_state, false
-    )
-
-    new_state, updated_model
+function advance_stay(internal::InternalEmotional, user_model::UserModel)::Tuple{InternalEmotional,UserModel}
+    internal.stress_level = max(0.0, internal.stress_level - 0.2)
+    internal.should_stay_present = internal.stress_level > 0.4
+    emotional = user_model.emotional_patterns
+    emotional["times_stayed_present"] = get(emotional, "times_stayed_present", 0) + 1
+    user_model.emotional_patterns = emotional
+    internal, user_model
 end
 
 end # module

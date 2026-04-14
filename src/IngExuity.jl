@@ -4,7 +4,7 @@
 # ============================================================================
 module IngExuity
 
-using HTTP
+using HTTP, Dates, Base.Iterators
 
 # Module structure — 16 modules + Memory matching IngEnuity architecture v1.3
 include("modules/Types.jl")
@@ -62,8 +62,7 @@ function chat(input::String; session_id::Int64=0)::String
 
     predictions = Predictions.predict(
         user_model, internal_emotional, precognition,
-        GLOBAL_STATE.prediction_state.sandbox_results;
-        context=Dict{Symbol, Any}(:latest_input => input)
+        GLOBAL_STATE.prediction_state.sandbox_results
     )
 
     sandbox_results = SandboxSim.simulate_batch(predictions, user_model, self_model)
@@ -76,7 +75,7 @@ function chat(input::String; session_id::Int64=0)::String
     output = Output.render(response, comprehension; voice_enabled=true)
     understanding = Understanding.interpret(human_input, response, surviving_predictions, reaction)
 
-    Memory.store("User said: $(human_input.raw)", source=:conversation, confidence=0.9)
+    Memory.store("User said: $(human_input.raw)", source=:conversation)
     if !isempty(comprehension[:topic]) && comprehension[:topic] != "general"
         Memory.store("Topic: $(comprehension[:topic])", source=:topic_detection)
     end
@@ -95,7 +94,7 @@ function chat(input::String; session_id::Int64=0)::String
     output.text
 end
 
-function build_stay_present_response(internal::InternalEmotional, user_model::UserModel)::String
+function build_stay_present_response(internal::Types.InternalEmotional, user_model::Types.UserModel)::String
     if internal.stress_level > 0.7
         "That sounds really hard. I'm here — take your time."
     elseif internal.valence < -0.4
@@ -139,7 +138,7 @@ end
 json_value(v::Nothing) = "null"
 json_value(v::Bool) = v ? "true" : "false"
 json_value(v::Real) = string(v)
-json_value(v::AbstractString) = "\"$(replace(v, "\"" => "\\\""))\"" 
+json_value(v::AbstractString) = "\"$(replace(replace(v, "\\" => "\\\\"), "\"" => "\\\""))\"" 
 json_value(v::Vector{UInt8}) = string(v)
 
 function json_value(v::Vector)
@@ -165,7 +164,6 @@ function handle_request(req::HTTP.Request)::HTTP.Response
         return HTTP.Response(200, "ok")
     elseif target == "/api/chat" && HTTP.method(req) == "POST"
         body = String(req.body)
-        # Simple parse: {"message": "..."}
         m = match(r"\"message\"\s*:\s*\"([^\"]+)\"", body)
         input = m !== nothing ? m[1] : ""
         isempty(input) && return HTTP.Response(200, ["Content-Type" => "application/json"], body=to_json(Dict("error" => "no message")))
@@ -214,10 +212,10 @@ button { padding: 12px 24px; background: #7aff7a; border: none; border-radius: 8
 async function send() {
   const inp = document.getElementById('input'), chat = document.getElementById('chat');
   const text = inp.value.trim(); if(!text) return;
-  chat.innerHTML += '<div class="msg user">' + text + '</div>';
   inp.value = '';
   const res = await fetch('/api/chat', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({message: text})});
   const data = await res.json();
+  chat.innerHTML += '<div class="msg user">' + text + '</div>';
   chat.innerHTML += '<div class="msg ai">' + data.response + '</div>';
   chat.scrollTop = chat.scrollHeight;
   updateStats();
@@ -225,7 +223,7 @@ async function send() {
 async function updateStats() {
   const r = await fetch('/api/intelligence');
   const d = await r.json();
-  document.getElementById('stats').innerText = 'Intelligence: ' + d.correct + '/' + d.total + ' predictions | accuracy: ' + (d.accuracy*100).toFixed(1) + '%';
+  document.getElementById('stats').innerText = 'Intelligence: ' + d.correct + '/' + d.total + ' predictions';
 }
 updateStats();
 </script>

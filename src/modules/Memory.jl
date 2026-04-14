@@ -1,76 +1,38 @@
 # ============================================================================
-# Memory.jl — Memory layer with validity windows
+# Memory.jl — Validity-window memory store
 # ============================================================================
 module Memory
 
-using ...Types
+const STORE = Memory[]
 
-# In-memory store + optional SQLite persistence
-const STORE = Dict{String, Memory}()
+export store, retrieve, search, count
 
-"""Store a fact with a validity window"""
-function store(
-    fact::String;
-    valid_from::DateTime=now(),
-    valid_until::DateTime=now() + Dates.Hour(24 * 365 * 10),  # default 10 years
-    confidence::Float64=0.9,
-    source::Symbol=:conversation
-)
-    key = hash(fact)
-    mem = Memory(fact, valid_from, valid_until, confidence, source)
-    STORE[string(key)] = mem
-    mem
+function store(fact::String; valid_from=nothing, valid_until=nothing, confidence=1.0, source=:conversation)
+    from = valid_from === nothing ? now() : valid_from
+    until = valid_until === nothing ? now() + Dates.Hour(24) : valid_until
+    push!(STORE, Memory(fact, from, until, confidence, source))
+    nothing
 end
 
-"""Retrieve all valid facts for a given time"""
-function retrieve(at::DateTime=now())::Vector{Memory}
-    [m for m in values(STORE)
-        if m.valid_from <= at <= m.valid_until]
-end
-
-"""Search facts by keyword"""
-function search(query::String)::Vector{Memory}
-    q = lowercase(query)
-    [m for m in values(STORE) if occursin(q, lowercase(m.fact))]
-end
-
-"""Get a specific fact by hash key"""
-function get(key::String)::Union{Memory, Nothing}
-    get(STORE, key, nothing)
-end
-
-"""Update temporal validity of a fact"""
-function update_validity!(
-    fact::String;
-    valid_until::DateTime
-)
-    key = string(hash(fact))
-    if haskey(STORE, key)
-        STORE[key] = Memory(
-            STORE[key].fact,
-            STORE[key].valid_from,
-            valid_until,
-            STORE[key].confidence,
-            STORE[key].source
-        )
+function retrieve(; include_expired=false)
+    now_ts = now()
+    if include_expired
+        STORE
+    else
+        [m for m in STORE if m.valid_until > now_ts]
     end
 end
 
-"""Clear expired facts"""
-function purge_expired(at::DateTime=now())
-    expired_keys = [k for (k, m) in STORE if m.valid_until < at]
-    foreach(k -> delete!(STORE, k), expired_keys)
-    length(expired_keys)
+function search(query::String; limit::Int=10)
+    now_ts = now()
+    results = [m for m in STORE if m.valid_until > now_ts && occursin(lowercase(query), lowercase(m.fact))]
+    sort!(results, rev=true, by=m -> m.confidence)
+    results[1:min(limit, length(results))]
 end
 
-"""Number of stored facts"""
-function count()::Int64
-    length(STORE)
-end
-
-"""Summary of stored memory"""
-function summary()::String
-    "$count() facts stored"
+function count()
+    now_ts = now()
+    length([m for m in STORE if m.valid_until > now_ts])
 end
 
 end # module

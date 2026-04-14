@@ -1,37 +1,18 @@
 # ============================================================================
-# SelfModel.jl — Cognitive: system's model of itself
+# SelfModel.jl — IngEnuity's self-awareness
 # ============================================================================
 module SelfModel
 
-using ...Types
+export update
 
-"""Update the self model based on the current exchange"""
-function update(
-    model::SelfModel,
-    input::HumanInput,
-    comprehension::Dict{Symbol, Any}
-)::SelfModel
-    # Track uncertainty from comprehension
-    new_state = if comprehension[:uncertainty]::Bool
-        SystemState(:uncertain)
-    elseif comprehension[:emotional_charge]::Float64 > 0.6
-        SystemState(:processing)
+function update(self_model::SelfModel, human_input, comprehension)::SelfModel
+    # v1: track identity state
+    if comprehension[:is_question]
+        self_model.current_state = SystemState(:curious)
     else
-        SystemState(:idle)
+        self_model.current_state = SystemState(:processing)
     end
-
-    SelfModel(
-        model.identity,
-        model.capabilities,
-        model.limitations,
-        new_state,
-        model.confidence
-    )
-end
-
-"""Get current capability confidence"""
-function confidence(model::SelfModel)::Float64
-    model.confidence
+    self_model
 end
 
 end # module
