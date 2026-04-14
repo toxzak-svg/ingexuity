@@ -3,19 +3,23 @@
 # ============================================================================
 module Voice
 
+using ..Types: ResponseTone as ResponseToneType, COMMUNICATION_STYLE_CURIOUS,
+               RESPONSE_TONE_DIRECT, RESPONSE_TONE_WARM,
+               RESPONSE_TONE_PLAYFUL, RESPONSE_TONE_CURIOUS
+
 export determine_tone
 
 function determine_tone(internal, user_model, reaction)
     if internal.stress_level > 0.6
-        ResponseTone(:direct)
+        RESPONSE_TONE_DIRECT
     elseif internal.affective_state == "warm"
-        ResponseTone(:warm)
-    elseif user_model.communication_style == CommunicationStyle(:curious)
-        ResponseTone(:curious)
+        RESPONSE_TONE_WARM
+    elseif user_model.communication_style == COMMUNICATION_STYLE_CURIOUS
+        RESPONSE_TONE_CURIOUS
     elseif internal.arousal > 0.7
-        ResponseTone(:playful)
+        RESPONSE_TONE_PLAYFUL
     else
-        ResponseTone(:direct)
+        RESPONSE_TONE_DIRECT
     end
 end
 

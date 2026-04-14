@@ -3,10 +3,13 @@
 # ============================================================================
 module Output
 
+using ..Types: Output as OutputType, Response as ResponseType
+using Dates
+
 export render
 
-function render(response::Response, comprehension; voice_enabled::Bool=false)
-    Output(response.content, voice_enabled, now())
+function render(response::ResponseType, comprehension; voice_enabled::Bool=false)
+    OutputType(response.content, voice_enabled, Dates.now())
 end
 
 end # module

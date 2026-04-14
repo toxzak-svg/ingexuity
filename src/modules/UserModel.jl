@@ -3,9 +3,11 @@
 # ============================================================================
 module UserModel
 
+using ..Types: UserModel as UserModelType
+
 export update, is_stressed
 
-function update(user_model::UserModel, human_input, comprehension)::UserModel
+function update(user_model::UserModelType, human_input, comprehension)::UserModelType
     raw = human_input.raw
     words = split(lowercase(raw))
 
@@ -38,7 +40,7 @@ function update(user_model::UserModel, human_input, comprehension)::UserModel
     user_model
 end
 
-function is_stressed(user_model::UserModel)::Bool
+function is_stressed(user_model::UserModelType)::Bool
     emotional = user_model.emotional_patterns
     quiet_ratio = get(emotional, "quiet_count", 0) / max(1, length(user_model.topics))
     stress_triggers = get(emotional, "stress_triggers", String[])

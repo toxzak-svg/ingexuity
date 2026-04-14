@@ -3,9 +3,11 @@
 # ============================================================================
 module InternalEmotional
 
+using ..Types: InternalEmotional as InternalEmotionalType, UserModel as UserModelType
+
 export update, should_stay_present, advance_stay
 
-function update(internal::InternalEmotional, human_input, comprehension)::InternalEmotional
+function update(internal::InternalEmotionalType, human_input, comprehension)::InternalEmotionalType
     raw = human_input.raw
     words = split(lowercase(raw))
 
@@ -44,11 +46,11 @@ function update(internal::InternalEmotional, human_input, comprehension)::Intern
     internal
 end
 
-function should_stay_present(internal::InternalEmotional)::Bool
+function should_stay_present(internal::InternalEmotionalType)::Bool
     internal.should_stay_present
 end
 
-function advance_stay(internal::InternalEmotional, user_model::UserModel)::Tuple{InternalEmotional,UserModel}
+function advance_stay(internal::InternalEmotionalType, user_model::UserModelType)::Tuple{InternalEmotionalType,UserModelType}
     internal.stress_level = max(0.0, internal.stress_level - 0.2)
     internal.should_stay_present = internal.stress_level > 0.4
     emotional = user_model.emotional_patterns

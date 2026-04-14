@@ -3,14 +3,17 @@
 # ============================================================================
 module Memory
 
-const STORE = Memory[]
+using Dates
+using ..Types: Memory as MemoryType
+
+const STORE = MemoryType[]
 
 export store, retrieve, search, count
 
 function store(fact::String; valid_from=nothing, valid_until=nothing, confidence=1.0, source=:conversation)
-    from = valid_from === nothing ? now() : valid_from
-    until = valid_until === nothing ? now() + Dates.Hour(24) : valid_until
-    push!(STORE, Memory(fact, from, until, confidence, source))
+    from = valid_from === nothing ? Dates.now() : valid_from
+    until = valid_until === nothing ? Dates.now() + Dates.Hour(24) : valid_until
+    push!(STORE, MemoryType(fact, from, until, confidence, source))
     nothing
 end
 

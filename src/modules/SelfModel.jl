@@ -3,14 +3,16 @@
 # ============================================================================
 module SelfModel
 
+using ..Types: SelfModel as SelfModelType, SYSTEM_STATE_CURIOUS, SYSTEM_STATE_PROCESSING
+
 export update
 
-function update(self_model::SelfModel, human_input, comprehension)::SelfModel
+function update(self_model::SelfModelType, human_input, comprehension)::SelfModelType
     # v1: track identity state
     if comprehension[:is_question]
-        self_model.current_state = SystemState(:curious)
+        self_model.current_state = SYSTEM_STATE_CURIOUS
     else
-        self_model.current_state = SystemState(:processing)
+        self_model.current_state = SYSTEM_STATE_PROCESSING
     end
     self_model
 end

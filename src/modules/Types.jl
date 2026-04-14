@@ -2,15 +2,51 @@
 # Types.jl — Shared data structures for IngExuity v1.3
 # ============================================================================
 
+module Types
+
 using Dates
+
+export CommunicationStyle, SystemState, ResponseTone,
+       COMMUNICATION_STYLE_DIRECT, COMMUNICATION_STYLE_HEDGED,
+       COMMUNICATION_STYLE_TECHNICAL, COMMUNICATION_STYLE_CASUAL,
+       COMMUNICATION_STYLE_CURIOUS,
+       SYSTEM_STATE_IDLE, SYSTEM_STATE_PROCESSING,
+       SYSTEM_STATE_CURIOUS, SYSTEM_STATE_UNCERTAIN,
+       SYSTEM_STATE_LEARNING, SYSTEM_STATE_STAYING_PRESENT,
+       RESPONSE_TONE_DIRECT, RESPONSE_TONE_WARM,
+       RESPONSE_TONE_PLAYFUL, RESPONSE_TONE_CURIOUS,
+       RESPONSE_TONE_MINIMAL, RESPONSE_TONE_STAYING_PRESENT,
+       HumanInput, UserModel, SelfModel, InternalEmotional,
+       Prediction, SimulationResult, Response, Output,
+       Intelligence, Memory, PredictionState, ConversationState
 
 # ----------------------------------------------------------------------------
 # Enums
 # ----------------------------------------------------------------------------
 
-@enum CommunicationStyle :direct :hedged :technical :casual :curious
-@enum SystemState :idle :processing :curious :uncertain :learning :staying_present
-@enum ResponseTone :direct :warm :playful :curious :minimal :staying_present
+@enum CommunicationStyle direct hedged technical casual curious
+@enum SystemState idle processing curious uncertain learning staying_present
+@enum ResponseTone direct warm playful curious minimal staying_present
+
+const COMMUNICATION_STYLE_DIRECT = CommunicationStyle(0)
+const COMMUNICATION_STYLE_HEDGED = CommunicationStyle(1)
+const COMMUNICATION_STYLE_TECHNICAL = CommunicationStyle(2)
+const COMMUNICATION_STYLE_CASUAL = CommunicationStyle(3)
+const COMMUNICATION_STYLE_CURIOUS = CommunicationStyle(4)
+
+const SYSTEM_STATE_IDLE = SystemState(0)
+const SYSTEM_STATE_PROCESSING = SystemState(1)
+const SYSTEM_STATE_CURIOUS = SystemState(2)
+const SYSTEM_STATE_UNCERTAIN = SystemState(3)
+const SYSTEM_STATE_LEARNING = SystemState(4)
+const SYSTEM_STATE_STAYING_PRESENT = SystemState(5)
+
+const RESPONSE_TONE_DIRECT = ResponseTone(0)
+const RESPONSE_TONE_WARM = ResponseTone(1)
+const RESPONSE_TONE_PLAYFUL = ResponseTone(2)
+const RESPONSE_TONE_CURIOUS = ResponseTone(3)
+const RESPONSE_TONE_MINIMAL = ResponseTone(4)
+const RESPONSE_TONE_STAYING_PRESENT = ResponseTone(5)
 
 # ----------------------------------------------------------------------------
 # Core types
@@ -36,7 +72,7 @@ end
 function UserModel()
     UserModel(
         "Human",
-        CommunicationStyle(:direct),
+        COMMUNICATION_STYLE_DIRECT,
         String[],
         Dict{String,Any}(),
         0.5,
@@ -64,7 +100,7 @@ SelfModel() = SelfModel(
     "IngEnuity",
     ["reasoning", "prediction", "conversation", "learning"],
     ["perfect memory", "infinite context"],
-    SystemState(:idle),
+    SYSTEM_STATE_IDLE,
     0.9
 )
 
@@ -159,3 +195,5 @@ ConversationState(session_id::Int64) = ConversationState(
     session_id, 0, UserModel(), SelfModel(),
     InternalEmotional(), PredictionState(), HumanInput[], 0
 )
+
+end # module Types
