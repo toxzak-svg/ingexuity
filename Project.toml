@@ -5,7 +5,7 @@ version = "0.1.0"
 julia = "1.10"
 
 [deps]
-HTTP = "cd3eb08d-1c22-4dce-8e12-ad71adb6b8e9"
+HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
 
 [compat]
 HTTP = "1"
