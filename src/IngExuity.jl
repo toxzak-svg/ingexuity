@@ -1,14 +1,12 @@
 # ============================================================================
-# IngExuity.jl — Main entry point
+# IngExuity.jl — Main entry point (minimal HTTP server, no external deps)
 # Julia everywhere: runtime + inference + server
 # ============================================================================
 module IngExuity
 
-using Genie
-using Genie.Router
-using Genie.Renderer.Html
+using HTTP
 
-# Module structure — 16 modules matching IngEnuity architecture v1.2
+# Module structure — 16 modules + Memory matching IngEnuity architecture v1.3
 include("modules/Types.jl")
 include("modules/HumanInput.jl")
 include("modules/ResultsAnalysis.jl")
@@ -38,132 +36,56 @@ include("modules/Intelligence.jl")
 
 const GLOBAL_STATE = Types.ConversationState(0)
 
-"""
-    chat(input::String; session_id::Int64=0)::String
-
-Main entry point. Takes a string from the human, runs it through the
-IngEnuity module pipeline, returns the response string.
-"""
 function chat(input::String; session_id::Int64=0)::String
-    # === INPUT LAYER ===
     human_input = HumanInput.process(input; session_id=session_id)
-
-    # === RESULTS ANALYSIS (feedback from previous turns) ===
     results = ResultsAnalysis.process(human_input, GLOBAL_STATE)
-
-    # === COGNITIVE PROCESSING ===
     comprehension = Comprehension.comprehend(human_input)
-
-    # Update self model
     self_model = SelfModel.update(GLOBAL_STATE.self_model, human_input, comprehension)
-
-    # Update user model (with emotional patterns)
     user_model = UserModel.update(GLOBAL_STATE.user_model, human_input, comprehension)
-
-    # Update internal emotional state (WITH PRESENCING CHECK)
-    internal_emotional = InternalEmotional.update(
-        GLOBAL_STATE.internal_emotional,
-        human_input,
-        comprehension
-    )
+    internal_emotional = InternalEmotional.update(GLOBAL_STATE.internal_emotional, human_input, comprehension)
 
     # === PRESENCING CHECK ===
-    # Should we stay with this emotional moment before solving?
     if InternalEmotional.should_stay_present(internal_emotional)
-        # STAY PRESENT: acknowledge first, then solve
         stay_response = build_stay_present_response(internal_emotional, user_model)
-
-        # Update emotional patterns to record we stayed present
-        new_state, updated_model = InternalEmotional.advance_stay(
-            internal_emotional, user_model
-        )
+        new_state, updated_model = InternalEmotional.advance_stay(internal_emotional, user_model)
         GLOBAL_STATE.internal_emotional = new_state
         GLOBAL_STATE.user_model = updated_model
         GLOBAL_STATE.turn_count += 1
-
         return stay_response
     end
 
-    # Curiosity check
     curiosity = Curiosity.check(human_input, comprehension, user_model)
-
-    # === RESEARCH & REASONING ===
     research = Research.investigate(human_input, comprehension; curiosity=curiosity)
-
     decision = Decision.decide(research)
-
-    # Creative Ingenuity (for novel situations)
     creative = CreativeIngenuity.generate(research, internal_emotional)
-
-    # Precognition (long-range trajectory)
     precognition = Precognition.predict_trajectory(user_model, internal_emotional)
 
-    # === PREDICTION ENGINE (PRIMARY) ===
     predictions = Predictions.predict(
-        user_model,
-        internal_emotional,
-        precognition,
+        user_model, internal_emotional, precognition,
         GLOBAL_STATE.prediction_state.sandbox_results;
-        context=Dict(:latest_input => input)
+        context=Dict{Symbol, Any}(:latest_input => input)
     )
 
-    # === SANDBOX SIM ===
-    sandbox_results = SandboxSim.simulate_batch(
-        predictions,
-        user_model,
-        self_model
-    )
-
-    # Filter to surviving predictions
+    sandbox_results = SandboxSim.simulate_batch(predictions, user_model, self_model)
     surviving_predictions = SandboxSim.filter_surviving(predictions, sandbox_results)
-
-    # === ACTION ===
     action = Action.execute(decision, creative, surviving_predictions)
-
-    # === REACTION OBSERVANCE ===
     reaction = ReactionObservance.observe(human_input, action)
-
-    # === OUTPUT LAYER ===
-    # Determine tone
     tone = Voice.determine_tone(internal_emotional, user_model, reaction)
-
-    # Formulate response
     response = Response.formulate(surviving_predictions, comprehension; tone=tone)
-
-    # Adjust for emotional state
     response = Response.adjust_tone(response, internal_emotional)
-
-    # Render output
     output = Output.render(response, comprehension; voice_enabled=true)
+    understanding = Understanding.interpret(human_input, response, surviving_predictions, reaction)
 
-    # === UNDERSTANDING + INTELLIGENCE ===
-    understanding = Understanding.interpret(
-        human_input,
-        response,
-        surviving_predictions,
-        reaction
-    )
-
-    # === MEMORY: store this exchange ===
-    Memory.store(
-        "User said: $(human_input.raw)",
-        source=:conversation,
-        confidence=0.9
-    )
+    Memory.store("User said: $(human_input.raw)", source=:conversation, confidence=0.9)
     if !isempty(comprehension[:topic]) && comprehension[:topic] != "general"
-        Memory.store(
-            "Topic: $(comprehension[:topic])",
-            source=:topic_detection
-        )
+        Memory.store("Topic: $(comprehension[:topic])", source=:topic_detection)
     end
 
-    # Update intelligence from outcome
     for pred in surviving_predictions
         was_correct = pred.confidence > 0.7
         Predictions.update_from_outcome!(GLOBAL_STATE.prediction_state, pred, was_correct)
     end
 
-    # === UPDATE GLOBAL STATE ===
     GLOBAL_STATE.turn_count += 1
     GLOBAL_STATE.user_model = user_model
     GLOBAL_STATE.self_model = self_model
@@ -173,24 +95,12 @@ function chat(input::String; session_id::Int64=0)::String
     output.text
 end
 
-"""
-Build the stay-present response — acknowledge emotional state, stay with it,
-then allow user to continue before solving.
-"""
-function build_stay_present_response(
-    internal::InternalEmotional,
-    user_model::UserModel
-)::String
-    valence = internal.valence
-    stress = internal.stress_level
-    emotional_charge = internal.emotional_charge
-
-    # Choose acknowledgment based on emotional state
-    if stress > 0.7
+function build_stay_present_response(internal::InternalEmotional, user_model::UserModel)::String
+    if internal.stress_level > 0.7
         "That sounds really hard. I'm here — take your time."
-    elseif valence < -0.4
+    elseif internal.valence < -0.4
         "That sounds discouraging. What matters most to you right now?"
-    elseif emotional_charge > 0.8
+    elseif internal.emotional_charge > 0.8
         "There's a lot in that. I'm listening — what do you want to focus on?"
     elseif user_model.emotional_patterns["is_quiet"]
         "You seem quiet. You don't have to say anything — I'm here."
@@ -199,118 +109,130 @@ function build_stay_present_response(
     end
 end
 
-"""
-    predict_user(;session_id::Int64=0)::Vector{Dict}
-
-Return the current predictions about the user without generating a response.
-"""
-function predict_user(;session_id::Int64=0)::Vector{Dict}
-    preds = GLOBAL_STATE.prediction_state.current_predictions
-    [
-        Dict(
-            "action" => p.predicted_action,
-            "need" => p.predicted_need,
-            "confidence" => p.confidence,
-            "sources" => [string(s) for s in p.source]
-        )
-        for p in preds
-    ]
+function predict_user()::Vector{Dict}
+    [Dict("action" => p.predicted_action, "need" => p.predicted_need,
+          "confidence" => p.confidence, "sources" => [string(s) for s in p.source])
+     for p in GLOBAL_STATE.prediction_state.current_predictions]
 end
 
-"""
-    get_intelligence()::Dict
-
-Return the current Intelligence metrics.
-"""
 function get_intelligence()::Dict
-    intel = GLOBAL_STATE.prediction_state.intelligence
-    Dict(
-        "correct_predictions" => intel.correct_predictions,
-        "total_predictions" => intel.total_predictions,
-        "accuracy" => intel.accuracy,
-        "last_updated" => string(intel.last_updated)
-    )
+    i = GLOBAL_STATE.prediction_state.intelligence
+    Dict("correct" => i.correct_predictions, "total" => i.total_predictions,
+         "accuracy" => i.accuracy, "last_updated" => string(i.last_updated))
 end
 
-"""
-    get_user_model()::Dict
-
-Return the current User Model.
-"""
 function get_user_model()::Dict
     um = GLOBAL_STATE.user_model
-    Dict(
-        "name" => um.name,
-        "communication_style" => string(um.communication_style),
-        "topics" => um.topics,
-        "prediction_confidence" => um.prediction_confidence,
-        "is_stressed" => UserModel.is_stressed(um),
-        "emotional_patterns" => um.emotional_patterns
-    )
+    Dict("name" => um.name, "communication_style" => string(um.communication_style),
+         "topics" => um.topics, "prediction_confidence" => um.prediction_confidence,
+         "is_stressed" => UserModel.is_stressed(um))
 end
 
-"""
-    get_memory_summary()::Dict
-
-Return memory stats.
-"""
 function get_memory_summary()::Dict
-    Dict(
-        "facts_stored" => Memory.count(),
-        "valid_facts" => length(Memory.retrieve())
-    )
+    Dict("facts_stored" => Memory.count(), "valid_facts" => length(Memory.retrieve()))
 end
 
 # ============================================================================
-# Genie.jl web server — API + embedded UI
+# Simple JSON helpers (no external deps)
 # ============================================================================
 
-route("/") do
-    html(gensub_view())
+json_value(v::Nothing) = "null"
+json_value(v::Bool) = v ? "true" : "false"
+json_value(v::Real) = string(v)
+json_value(v::AbstractString) = "\"$(replace(v, "\"" => "\\\""))\"" 
+json_value(v::Vector{UInt8}) = string(v)
+
+function json_value(v::Vector)
+    items = join([json_value(x) for x in v], ",")
+    "[$items]"
 end
 
-route("/api/chat", method=POST) do
-    params = Genie.Router.jsonpayload()
-    input = get(params, "message", "")
-    isempty(input) && return Genie.Renderer.json(Dict("error" => "no message"))
-    response = chat(input)
-    Genie.Renderer.json(Dict("response" => response))
+function json_value(v::Dict)
+    pairs = ["\"$k\": $(json_value(val))" for (k, val) in v]
+    "{$(join(pairs, ","))}"
 end
 
-route("/api/predict") do
-    Genie.Renderer.json(Dict("predictions" => predict_user()))
-end
-
-route("/api/intelligence") do
-    Genie.Renderer.json(get_intelligence())
-end
-
-route("/api/user_model") do
-    Genie.Renderer.json(get_user_model())
-end
-
-route("/api/memory") do
-    Genie.Renderer.json(get_memory_summary())
-end
-
-route("/health") do
-    "ok"
-end
+to_json(d::Dict) = json_value(d)
 
 # ============================================================================
-# Start the server
+# Minimal HTTP server
 # ============================================================================
 
+function handle_request(req::HTTP.Request)::HTTP.Response
+    target = req.target
+
+    if target == "/health"
+        return HTTP.Response(200, "ok")
+    elseif target == "/api/chat" && HTTP.method(req) == "POST"
+        body = String(req.body)
+        # Simple parse: {"message": "..."}
+        m = match(r"\"message\"\s*:\s*\"([^\"]+)\"", body)
+        input = m !== nothing ? m[1] : ""
+        isempty(input) && return HTTP.Response(200, ["Content-Type" => "application/json"], body=to_json(Dict("error" => "no message")))
+        response = chat(input)
+        return HTTP.Response(200, ["Content-Type" => "application/json"], body=to_json(Dict("response" => response)))
+    elseif target == "/api/predict"
+        return HTTP.Response(200, ["Content-Type" => "application/json"], body=to_json(Dict("predictions" => predict_user())))
+    elseif target == "/api/intelligence"
+        return HTTP.Response(200, ["Content-Type" => "application/json"], body=to_json(get_intelligence()))
+    elseif target == "/api/user_model"
+        return HTTP.Response(200, ["Content-Type" => "application/json"], body=to_json(get_user_model()))
+    elseif target == "/api/memory"
+        return HTTP.Response(200, ["Content-Type" => "application/json"], body=to_json(get_memory_summary()))
+    elseif target == "/"
+        return HTTP.Response(200, ["Content-Type" => "text/html"], body=HTML_UI)
+    else
+        return HTTP.Response(404, "Not found")
+    end
+end
+
+const HTML_UI = """
+<!DOCTYPE html>
+<html>
+<head>
+<title>IngExuity</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body { font-family: system-ui, sans-serif; max-width: 700px; margin: 40px auto; padding: 0 20px; background: #0a0a0a; color: #e0e0e0; }
+h1 { color: #7aff7a; font-size: 1.5em; }
+#chat { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px; }
+.msg { padding: 10px 14px; border-radius: 12px; max-width: 80%; }
+.msg.user { align-self: flex-end; background: #1a3a1a; }
+.msg.ai { align-self: flex-start; background: #1a1a2a; }
+input { width: 100%; padding: 12px; border-radius: 8px; border: 1px solid #333; background: #111; color: #fff; box-sizing: border-box; }
+button { padding: 12px 24px; background: #7aff7a; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; }
+#stats { font-size: 0.85em; color: #888; margin-top: 20px; }
+</style>
+</head>
+<body>
+<h1>IngExuity</h1>
+<div id="chat"></div>
+<input id="input" placeholder="Say something..." onkeydown="if(event.keyCode===13)send()">
+<button onclick="send()" style="margin-top:10px">Send</button>
+<div id="stats"></div>
+<script>
+async function send() {
+  const inp = document.getElementById('input'), chat = document.getElementById('chat');
+  const text = inp.value.trim(); if(!text) return;
+  chat.innerHTML += '<div class="msg user">' + text + '</div>';
+  inp.value = '';
+  const res = await fetch('/api/chat', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({message: text})});
+  const data = await res.json();
+  chat.innerHTML += '<div class="msg ai">' + data.response + '</div>';
+  chat.scrollTop = chat.scrollHeight;
+  updateStats();
+}
+async function updateStats() {
+  const r = await fetch('/api/intelligence');
+  const d = await r.json();
+  document.getElementById('stats').innerText = 'Intelligence: ' + d.correct + '/' + d.total + ' predictions | accuracy: ' + (d.accuracy*100).toFixed(1) + '%';
+}
+updateStats();
+</script>
+</body>
+</html>
 """
-    start(host::String="0.0.0.0", port::Int=8000)
 
-Start the IngEnuity web server.
-"""
-function start(host::String="0.0.0.0", port::Int=8000)
-    Genie.config.server_host = host
-    Genie.config.server_port = port
-    up(host, port)
-    println("IngEnuity running at http://$host:$port")
-end
+start() = HTTP.serve(handle_request, "0.0.0.0", 8000)
 
 end # module
