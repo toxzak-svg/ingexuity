@@ -24,9 +24,9 @@ export CommunicationStyle, SystemState, ResponseTone,
 # Enums
 # ----------------------------------------------------------------------------
 
-@enum CommunicationStyle direct hedged technical casual curious_comm
-@enum SystemState idle processing curious_state uncertain learning staying_present
-@enum ResponseTone direct warm playful curious_tone minimal staying_present
+@enum CommunicationStyle direct_comm hedged technical casual curious_comm
+@enum SystemState idle processing curious_state uncertain learning staying_present_state
+@enum ResponseTone direct_tone warm playful curious_tone minimal staying_present_tone
 
 const COMMUNICATION_STYLE_DIRECT = CommunicationStyle(0)
 const COMMUNICATION_STYLE_HEDGED = CommunicationStyle(1)
