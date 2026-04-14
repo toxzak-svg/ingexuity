@@ -8,7 +8,7 @@ using Genie
 using Genie.Router
 using Genie.Renderer.Html
 
-# Module structure — 16 modules matching IngExuity architecture v1.2
+# Module structure — 16 modules matching IngEnuity architecture v1.2
 include("modules/Types.jl")
 include("modules/HumanInput.jl")
 include("modules/ResultsAnalysis.jl")
@@ -23,6 +23,7 @@ include("modules/Decision.jl")
 include("modules/Precognition.jl")
 include("modules/Predictions.jl")
 include("modules/SandboxSim.jl")
+include("modules/Memory.jl")
 include("modules/Action.jl")
 include("modules/ReactionObservance.jl")
 include("modules/Response.jl")
@@ -32,7 +33,7 @@ include("modules/Understanding.jl")
 include("modules/Intelligence.jl")
 
 # ============================================================================
-# Conversation loop — the core IngExuity experience
+# Conversation loop — the core IngEnuity experience
 # ============================================================================
 
 const GLOBAL_STATE = Types.ConversationState(0)
@@ -40,8 +41,8 @@ const GLOBAL_STATE = Types.ConversationState(0)
 """
     chat(input::String; session_id::Int64=0)::String
 
-The main entry point. Takes a string from the human, runs it through the
-IngExuity module pipeline, and returns the response string.
+Main entry point. Takes a string from the human, runs it through the
+IngEnuity module pipeline, returns the response string.
 """
 function chat(input::String; session_id::Int64=0)::String
     # === INPUT LAYER ===
@@ -56,15 +57,32 @@ function chat(input::String; session_id::Int64=0)::String
     # Update self model
     self_model = SelfModel.update(GLOBAL_STATE.self_model, human_input, comprehension)
 
-    # Update user model
+    # Update user model (with emotional patterns)
     user_model = UserModel.update(GLOBAL_STATE.user_model, human_input, comprehension)
 
-    # Update internal emotional state
+    # Update internal emotional state (WITH PRESENCING CHECK)
     internal_emotional = InternalEmotional.update(
         GLOBAL_STATE.internal_emotional,
         human_input,
         comprehension
     )
+
+    # === PRESENCING CHECK ===
+    # Should we stay with this emotional moment before solving?
+    if InternalEmotional.should_stay_present(internal_emotional)
+        # STAY PRESENT: acknowledge first, then solve
+        stay_response = build_stay_present_response(internal_emotional, user_model)
+
+        # Update emotional patterns to record we stayed present
+        new_state, updated_model = InternalEmotional.advance_stay(
+            internal_emotional, user_model
+        )
+        GLOBAL_STATE.internal_emotional = new_state
+        GLOBAL_STATE.user_model = updated_model
+        GLOBAL_STATE.turn_count += 1
+
+        return stay_response
+    end
 
     # Curiosity check
     curiosity = Curiosity.check(human_input, comprehension, user_model)
@@ -126,9 +144,21 @@ function chat(input::String; session_id::Int64=0)::String
         reaction
     )
 
+    # === MEMORY: store this exchange ===
+    Memory.store(
+        "User said: $(human_input.raw)",
+        source=:conversation,
+        confidence=0.9
+    )
+    if !isempty(comprehension[:topic]) && comprehension[:topic] != "general"
+        Memory.store(
+            "Topic: $(comprehension[:topic])",
+            source=:topic_detection
+        )
+    end
+
     # Update intelligence from outcome
     for pred in surviving_predictions
-        # Simple heuristic: if we had high confidence, count it as a correct prediction
         was_correct = pred.confidence > 0.7
         Predictions.update_from_outcome!(GLOBAL_STATE.prediction_state, pred, was_correct)
     end
@@ -144,10 +174,35 @@ function chat(input::String; session_id::Int64=0)::String
 end
 
 """
+Build the stay-present response — acknowledge emotional state, stay with it,
+then allow user to continue before solving.
+"""
+function build_stay_present_response(
+    internal::InternalEmotional,
+    user_model::UserModel
+)::String
+    valence = internal.valence
+    stress = internal.stress_level
+    emotional_charge = internal.emotional_charge
+
+    # Choose acknowledgment based on emotional state
+    if stress > 0.7
+        "That sounds really hard. I'm here — take your time."
+    elseif valence < -0.4
+        "That sounds discouraging. What matters most to you right now?"
+    elseif emotional_charge > 0.8
+        "There's a lot in that. I'm listening — what do you want to focus on?"
+    elseif user_model.emotional_patterns["is_quiet"]
+        "You seem quiet. You don't have to say anything — I'm here."
+    else
+        "That sounds meaningful. I'm here — go on."
+    end
+end
+
+"""
     predict_user(;session_id::Int64=0)::Vector{Dict}
 
 Return the current predictions about the user without generating a response.
-Useful for debugging and for the dashboard.
 """
 function predict_user(;session_id::Int64=0)::Vector{Dict}
     preds = GLOBAL_STATE.prediction_state.current_predictions
@@ -188,7 +243,21 @@ function get_user_model()::Dict
         "name" => um.name,
         "communication_style" => string(um.communication_style),
         "topics" => um.topics,
-        "prediction_confidence" => um.prediction_confidence
+        "prediction_confidence" => um.prediction_confidence,
+        "is_stressed" => UserModel.is_stressed(um),
+        "emotional_patterns" => um.emotional_patterns
+    )
+end
+
+"""
+    get_memory_summary()::Dict
+
+Return memory stats.
+"""
+function get_memory_summary()::Dict
+    Dict(
+        "facts_stored" => Memory.count(),
+        "valid_facts" => length(Memory.retrieve())
     )
 end
 
@@ -220,6 +289,10 @@ route("/api/user_model") do
     Genie.Renderer.json(get_user_model())
 end
 
+route("/api/memory") do
+    Genie.Renderer.json(get_memory_summary())
+end
+
 route("/health") do
     "ok"
 end
@@ -231,13 +304,13 @@ end
 """
     start(host::String="0.0.0.0", port::Int=8000)
 
-Start the IngExuity web server.
+Start the IngEnuity web server.
 """
 function start(host::String="0.0.0.0", port::Int=8000)
     Genie.config.server_host = host
     Genie.config.server_port = port
     up(host, port)
-    println("IngExuity running at http://$host:$port")
+    println("IngEnuity running at http://$host:$port")
 end
 
 end # module

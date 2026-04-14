@@ -24,14 +24,23 @@ Base.@dataclass struct UserModel
     topics::Vector{String}
     temporal_patterns::Dict{String, Any}
     prediction_confidence::Float64
+    # Emotional patterns: what stresses them, what they deflect with, when silent
+    emotional_patterns::Dict{String, Any}
 end
 
 UserModel() = UserModel(
-    "Human",           # default name
+    "Human",
     CommunicationStyle(:direct),
-    String[],          # topics
-    Dict{String, Any}(), # temporal patterns
-    0.5               # prediction_confidence (init low)
+    String[],
+    Dict{String, Any}(),
+    0.5,
+    Dict{String, Any}(  # emotional patterns — learned over time
+        "stress_triggers" => String[],
+        "deflection_patterns" => String[],
+        "quiet_threshold" => 0.7,  # ratio of short messages before they're shutting down
+        "high_stress_markers" => String[],
+        "times_stayed_present" => 0
+    )
 )
 
 """Communication style enum"""
@@ -43,7 +52,7 @@ UserModel() = UserModel(
     :curious
 end
 
-"""IngExuity's model of itself"""
+"""IngEnuity's model of itself"""
 Base.@dataclass struct SelfModel
     identity::String
     capabilities::Vector{String}
@@ -53,7 +62,7 @@ Base.@dataclass struct SelfModel
 end
 
 SelfModel() = SelfModel(
-    "IngExuity",
+    "IngEnuity",
     ["reasoning", "prediction", "conversation", "learning"],
     ["perfect memory", "infinite context"],
     SystemState(:idle),
@@ -66,24 +75,27 @@ SelfModel() = SelfModel(
     :curious
     :uncertain
     :learning
+    :staying_present
 end
 
 """Internal emotional state"""
 Base.@dataclass struct InternalEmotional
-    valence::Float64        # -1.0 (negative) to 1.0 (positive)
-    arousal::Float64         # 0.0 to 1.0
-    stress_level::Float64    # 0.0 to 1.0
-    affective_state::String   # human-readable summary
+    valence::Float64          # -1.0 (negative) to 1.0 (positive)
+    arousal::Float64          # 0.0 to 1.0
+    stress_level::Float64     # 0.0 to 1.0
+    emotional_charge::Float64 # 0.0 to 1.0, overall charge of the exchange
+    affective_state::String    # human-readable summary
+    should_stay_present::Bool  # stay with emotional moment before solving
 end
 
-InternalEmotional() = InternalEmotional(0.0, 0.5, 0.0, "neutral")
+InternalEmotional() = InternalEmotional(0.0, 0.5, 0.0, 0.0, "neutral", false)
 
 """A prediction about the user's next state"""
 Base.@dataclass struct Prediction
     predicted_action::String
     predicted_need::String
-    confidence::Float64      # 0.0 to 1.0
-    source::Vector{Symbol}   # which modules contributed
+    confidence::Float64
+    source::Vector{Symbol}
     timestamp::DateTime
 end
 
@@ -110,6 +122,7 @@ end
     :playful
     :curious
     :minimal
+    :staying_present  # special tone for emotional moments
 end
 
 """Final output to the user"""
@@ -128,6 +141,15 @@ Base.@dataclass struct Intelligence
 end
 
 Intelligence() = Intelligence(0, 0, 0.0, now())
+
+"""Memory with validity window for temporal tracking"""
+Base.@dataclass struct Memory
+    fact::String
+    valid_from::DateTime
+    valid_until::DateTime
+    confidence::Float64
+    source::Symbol
+end
 
 # ----------------------------------------------------------------------------
 # Module state containers
@@ -161,11 +183,12 @@ Base.@dataclass struct ConversationState
     internal_emotional::InternalEmotional
     prediction_state::PredictionState
     active_context::Vector{HumanInput}
+    stay_present_turns::Int64  # how many turns to stay present before solving
 end
 
 ConversationState(session_id::Int64) = ConversationState(
     session_id, 0, UserModel(), SelfModel(),
-    InternalEmotional(), PredictionState(), HumanInput[]
+    InternalEmotional(), PredictionState(), HumanInput[], 0
 )
 
 end # module
