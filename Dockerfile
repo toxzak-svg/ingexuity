@@ -5,11 +5,8 @@ WORKDIR /root
 # Copy Project.toml
 COPY Project.toml .
 
-# Install Julia dependencies
-RUN julia --project=. -e 'using Pkg; Pkg.instantiate'
-
-# Precompile HTTP dependency (avoid stale cache issues)
-RUN julia --project=. -e 'using HTTP'
+# Install Julia dependencies (force redownload to break stale cache)
+RUN julia --project=. -e 'using Pkg; Pkg.instantiate(); using HTTP; @info "HTTP ready"'
 
 # Copy source
 COPY src/ src/
