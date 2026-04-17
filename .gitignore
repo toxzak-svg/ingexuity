@@ -1,0 +1,7 @@
+# Data and extracted outputs
+data/
+*.zip
+*.jsonl.bak
+
+# IDE
+.vscode/
