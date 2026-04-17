@@ -8,7 +8,7 @@ ENV PORT=8000
 COPY Project.toml .
 
 # Install Julia dependencies (force redownload to break stale cache)
-RUN julia --project=. -e 'using Pkg; Pkg.instantiate(); using HTTP; @info "HTTP ready"'
+RUN julia --project=. -e 'using Pkg; Pkg.instantiate(); using HTTP, Flux; @info "Deps ready"'
 
 # Copy source
 COPY src/ src/
