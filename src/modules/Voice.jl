@@ -1,26 +1,33 @@
 # ============================================================================
 # Voice.jl — Determine tone and voice modulation
+# No external deps — pure Julia
 # ============================================================================
 module Voice
 
-using ..Types: ResponseTone as ResponseToneType, COMMUNICATION_STYLE_CURIOUS,
+using ..Types: ResponseTone, COMMUNICATION_STYLE_CURIOUS,
                RESPONSE_TONE_DIRECT, RESPONSE_TONE_WARM,
                RESPONSE_TONE_PLAYFUL, RESPONSE_TONE_CURIOUS
 
 export determine_tone
 
-function determine_tone(internal, user_model, reaction)
+"""
+Determine the response tone based on internal state and user model.
+Returns a Symbol: :direct, :warm, :playful, :curious, :minimal, :staying_present
+"""
+function determine_tone(internal, user_model, reaction)::Symbol
     if internal.stress_level > 0.6
-        RESPONSE_TONE_DIRECT
+        :direct
     elseif internal.affective_state == "warm"
-        RESPONSE_TONE_WARM
+        :warm
     elseif user_model.communication_style == COMMUNICATION_STYLE_CURIOUS
-        RESPONSE_TONE_CURIOUS
+        :curious
     elseif internal.arousal > 0.7
-        RESPONSE_TONE_PLAYFUL
+        :playful
+    elseif internal.should_stay_present
+        :staying_present
     else
-        RESPONSE_TONE_DIRECT
+        :direct
     end
 end
 
-end # module
+end # module Voice

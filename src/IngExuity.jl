@@ -69,8 +69,8 @@ function chat(input::String; session_id::Int64=0)::String
     surviving_predictions = SandboxSim.filter_surviving(predictions, sandbox_results)
     action = Action.execute(decision, creative, surviving_predictions)
     reaction = ReactionObservance.observe(human_input, action)
-    tone = Voice.determine_tone(internal_emotional, user_model, reaction)
-    response = Response.formulate(surviving_predictions, comprehension; tone=tone)
+    tone = Voice.determine_tone(internal_emotional, user_model, reaction)  # Symbol now
+    response = Response.formulate(surviving_predictions, comprehension; tone=tone)  # Symbol
     response = Response.adjust_tone(response, internal_emotional)
     output = Output.render(response, comprehension; voice_enabled=true)
     understanding = Understanding.interpret(human_input, response, surviving_predictions, reaction)
