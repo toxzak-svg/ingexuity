@@ -11,7 +11,7 @@ using ..Types: SelfModel as SelfModelType, InternalEmotional as InternalEmotiona
                SYSTEM_STATE_UNCERTAIN, SYSTEM_STATE_LEARNING, SYSTEM_STATE_STAYING_PRESENT
 using Dates
 
-export IdentityBundle, create_bundle, apply_bundle, merge_bundle,
+export IdentityStateBundle, IdentityBundle, create_bundle, apply_bundle, merge_bundle,
        bundle_to_dict, dict_to_bundle, get_identity_fingerprint,
        export_bundle, import_bundle, export_full_state, import_full_state
 
@@ -37,8 +37,10 @@ struct IdentityBundle
     facts_stored::Int64
 end
 
+const IdentityStateBundle = IdentityBundle
+
 struct FullIdentityState
-    bundle::IdentityStateBundle
+    bundle::IdentityBundle
     memory::Vector{Dict{String,Any}}
     user_model::Dict{String,Any}
     temporal_patterns::Dict{String,Any}
@@ -261,7 +263,7 @@ function export_bundle(state::FullIdentityState)::Dict{String,Any}
 end
 
 function import_bundle(data::Dict{String,Any})::FullIdentityState
-    bundle_dict = get(data, "bundle", bundle_to_dict(IdentityStateBundle(
+    bundle_dict = get(data, "bundle", bundle_to_dict(IdentityBundle(
         CURRENT_BUNDLE_VERSION, "", "IngExuity", String[], String[], "idle", 0.5,
         0.0, 0.5, 0.0, 0.0, "neutral", false, 0, 0, 0.0, 0
     )))

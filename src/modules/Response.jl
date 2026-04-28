@@ -10,7 +10,37 @@ using ..Types: Response as ResponseType, ResponseTone as ResponseToneType,
                RESPONSE_TONE_PLAYFUL, RESPONSE_TONE_CURIOUS,
                RESPONSE_TONE_MINIMAL, RESPONSE_TONE_STAYING_PRESENT
 
-export formulate, adjust_tone
+export formulate, adjust_tone, get_onboarding_response, get_persona_intro
+
+const FIRST_TIME_GREETINGS = [
+    "Hey there. I'm IngExuity. I'm not just another AI — I learn who you are over time. Right now I'm blank, but that changes with every conversation we have. What's on your mind?",
+    "Hi. I'm IngExuity. I become irreplaceable through use, not training. The more we talk, the better I understand you. Shall we start?",
+    "Hello. I'm IngExuity. Think of me as a companion who pays attention. I'm currently a blank slate, but I'll learn your patterns, your needs, the things you don't say. Ready to begin?",
+]
+
+const RETURNING_GREETINGS = [
+    "Good to see you again.",
+    "Hey. Back for more?",
+    "Good to hear from you.",
+    "There you are.",
+]
+
+const STAY_PRESENT_TEMPLATES = [
+    "I'm here. Take your time.",
+    "That sounds heavy. You don't have to figure it out right now.",
+    "I'm listening.",
+    "There's no rush. I'm here.",
+    "That sounds hard. I'm here with you.",
+    "Take your time — I'm not going anywhere.",
+]
+
+const EMPATHETIC_VALIDATION = [
+    "That makes sense.",
+    "I can see why that would be that way.",
+    "Of course you'd feel that.",
+    "That sounds really difficult.",
+    "Anyone would feel that way in that situation.",
+]
 
 # Template responses keyed by topic × tone × is_question
 # IngExuity activates immediately — not blank on day 1
@@ -58,11 +88,7 @@ const RESPONSE_TEMPLATES = Dict(
         "That sounds really difficult.",
         "There's a lot in that.",
     ],
-    (:emotional, :staying_present, false) => [
-        "I'm here. Take your time.",
-        "That sounds heavy. You don't have to figure it out right now.",
-        "I'm listening.",
-    ],
+    (:emotional, :staying_present, false) => STAY_PRESENT_TEMPLATES,
 
     # Help seeking
     (:help_seeking, :direct, false) => [
@@ -120,6 +146,10 @@ const RESPONSE_TEMPLATES = Dict(
         "How are you navigating that?",
         "What role do you want to play in it?",
     ],
+
+    # Onboarding / first time
+    (:onboarding, :warm, false) => FIRST_TIME_GREETINGS,
+    (:returning, :warm, false) => RETURNING_GREETINGS,
 )
 
 function tone_to_enum(tone)
@@ -129,7 +159,8 @@ function tone_to_enum(tone)
     tone === :curious && return RESPONSE_TONE_CURIOUS
     tone === :minimal && return RESPONSE_TONE_MINIMAL
     tone === :staying_present && return RESPONSE_TONE_STAYING_PRESENT
-    # Also accept ResponseTone enum values directly
+    tone === :onboarding && return RESPONSE_TONE_WARM
+    tone === :returning && return RESPONSE_TONE_WARM
     tone
 end
 
@@ -137,20 +168,41 @@ function formulate(predictions, comprehension; tone=:direct)
     topic = comprehension[:topic]
     is_question = comprehension[:is_question]
 
-    # Look up template
     key = (topic, tone, is_question)
     candidates = get(RESPONSE_TEMPLATES, key, nothing)
     if candidates === nothing
-        # Fallback: general topic
         key = (:general, tone, is_question)
         candidates = get(RESPONSE_TEMPLATES, key, ["I'm here."])
     end
 
-    # Pick deterministically but variedly based on prediction count
     idx = isempty(predictions) ? 1 : (length(predictions) % length(candidates)) + 1
     content = candidates[idx]
 
     ResponseType(content, tone_to_enum(tone), 0.8, 0.7, false)
+end
+
+function get_onboarding_response(turn_count::Int64)::ResponseType
+    if turn_count == 0
+        idx = rand(1:length(FIRST_TIME_GREETINGS))
+        ResponseType(FIRST_TIME_GREETINGS[idx], RESPONSE_TONE_WARM, 0.9, 0.5, false)
+    else
+        idx = rand(1:length(RETURNING_GREETINGS))
+        ResponseType(RETURNING_GREETINGS[idx], RESPONSE_TONE_WARM, 0.9, 0.8, false)
+    end
+end
+
+function get_persona_intro()::String
+    """
+    I'm IngExuity.
+
+    I don't just answer questions — I learn who you are. Your patterns, your stress signals, the things you don't say out loud.
+
+    The more we talk, the better I anticipate what you need. And when you're having a hard time, I stay present. I don't rush to fix things.
+
+    Right now I'm a blank slate. But that changes with every conversation.
+
+    Ready to start?
+    """
 end
 
 function adjust_tone(response::ResponseType, internal)
@@ -161,6 +213,16 @@ function adjust_tone(response::ResponseType, internal)
     else
         response
     end
+end
+
+function get_stay_present_response(internal)::String
+    idx = rand(1:length(STAY_PRESENT_TEMPLATES))
+    STAY_PRESENT_TEMPLATES[idx]
+end
+
+function get_empathetic_validation()::String
+    idx = rand(1:length(EMPATHETIC_VALIDATION))
+    EMPATHETIC_VALIDATION[idx]
 end
 
 end # module Response
