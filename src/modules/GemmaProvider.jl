@@ -1,8 +1,14 @@
 # ============================================================================
-# GemmaProvider.jl — LLM provider for Gemma 4 E2B via Python HTTP service
+# GemmaProvider.jl — DEPRECATED (2026-04-28)
+#
+# This module is kept for reference only. IngExuity now uses a Julia-native
+# transformer (Flux.jl, see SPEC.md). No external API dependency.
+#
+# LLM provider for Gemma 4 E2B via Python HTTP service
 # Integrates native function calling and audio into IngExuity
 # ============================================================================
 module GemmaProvider
+@warn "GemmaProvider is deprecated. IngExuity now uses a Julia-native transformer built with Flux.jl. See SPEC.md."
 
 using HTTP, JSON
 

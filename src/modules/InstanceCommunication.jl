@@ -1,6 +1,7 @@
 # ============================================================================
 # InstanceCommunication.jl — Multi-instance message passing
-# v1.0: Instance discovery, message passing, shared state sync
+# v2.0: Instance discovery, message passing, shared state sync
+# Each instance is a distinct entity unless connected by user
 # ============================================================================
 module InstanceCommunication
 
@@ -9,10 +10,11 @@ using ..Types: HumanInput as HumanInputType, UserModel as UserModelType,
 using Dates
 
 export InstanceMessage, InstanceRegistry, register_instance, unregister_instance,
-       send_message, broadcast_to_all, sync_state, get_active_instances
+       send_message, broadcast_to_all, sync_state, get_active_instances,
+       get_messages_for_instance, acknowledge_messages!, create_sync_payload
 
 const MESSAGE_TYPES = [:ping, :pong, :state_sync, :prediction_share, :memory_share,
-                       :emotional_contagion, :shutdown]
+                       :emotional_contagion, :shutdown, :identity_transfer]
 
 struct InstanceMessage
     from_instance_id::String
@@ -21,17 +23,22 @@ struct InstanceMessage
     payload::Dict{String,Any}
     timestamp::String
     priority::Int64
+    acknowledged::Bool
 end
 
 InstanceMessage(from::String, to::Union{String,Nothing}, msg_type::Symbol, payload::Dict{String,Any}) =
-    InstanceMessage(from, to, msg_type, payload, string(now()), 0)
+    InstanceMessage(from, to, msg_type, payload, string(now()), 0, false)
 
 struct InstanceRegistry
     instance_id::String
     instances::Dict{String,Dict{String,Any}}
     message_queue::Vector{InstanceMessage}
     is_leader::Bool
+    connected_instances::Set{String}
 end
+
+InstanceRegistry(id::String, inst::Dict, queue::Vector, leader::Bool) =
+    InstanceRegistry(id, inst, queue, leader, Set{String}())
 
 function uuid4()::String
     bytes = rand(UInt8, 16)
@@ -49,7 +56,8 @@ const GLOBAL_REGISTRY = InstanceRegistry(
     uuid4(),
     Dict{String,Dict{String,Any}}(),
     InstanceMessage[],
-    false
+    false,
+    Set{String}()
 )
 
 function register_instance(
@@ -58,7 +66,8 @@ function register_instance(
     metadata::Dict{String,Any}=Dict{String,Any}()
 )::Bool
     if haskey(registry.instances, instance_id)
-        return false
+        registry.instances[instance_id]["last_seen"] = string(now())
+        return true
     end
 
     registry.instances[instance_id] = Dict{String,Any}(
@@ -66,7 +75,8 @@ function register_instance(
         "registered_at" => string(now()),
         "last_seen" => string(now()),
         "is_leader" => false,
-        "metadata" => metadata
+        "metadata" => metadata,
+        "connected_to" => String[]
     )
 
     if isempty(registry.instances) || registry.is_leader
@@ -82,6 +92,47 @@ function unregister_instance(registry::InstanceRegistry, instance_id::String)::B
     end
 
     delete!(registry.instances, instance_id)
+    delete!(registry.connected_instances, instance_id)
+    true
+end
+
+function connect_instances!(registry::InstanceRegistry, instance_id_1::String, instance_id_2::String)::Bool
+    if !haskey(registry.instances, instance_id_1) || !haskey(registry.instances, instance_id_2)
+        return false
+    end
+
+    push!(registry.connected_instances, instance_id_1)
+    push!(registry.connected_instances, instance_id_2)
+
+    registry.instances[instance_id_1]["connected_to"] = push!(
+        get(registry.instances[instance_id_1], "connected_to", String[]),
+        instance_id_2
+    )
+    registry.instances[instance_id_2]["connected_to"] = push!(
+        get(registry.instances[instance_id_2], "connected_to", String[]),
+        instance_id_1
+    )
+
+    true
+end
+
+function disconnect_instances!(registry::InstanceRegistry, instance_id_1::String, instance_id_2::String)::Bool
+    if !haskey(registry.instances, instance_id_1) || !haskey(registry.instances, instance_id_2)
+        return false
+    end
+
+    delete!(registry.connected_instances, instance_id_1)
+    delete!(registry.connected_instances, instance_id_2)
+
+    registry.instances[instance_id_1]["connected_to"] = filter!(
+        x -> x != instance_id_2,
+        get(registry.instances[instance_id_1], "connected_to", String[])
+    )
+    registry.instances[instance_id_2]["connected_to"] = filter!(
+        x -> x != instance_id_1,
+        get(registry.instances[instance_id_2], "connected_to", String[])
+    )
+
     true
 end
 
@@ -116,6 +167,26 @@ function broadcast_to_all(
     count
 end
 
+function broadcast_to_connected(
+    registry::InstanceRegistry,
+    from_instance_id::String,
+    message_type::Symbol,
+    payload::Dict{String,Any}
+)::Int64
+    count = 0
+    connected = get(registry.instances[from_instance_id], "connected_to", String[])
+
+    for target_id in connected
+        if haskey(registry.instances, target_id)
+            msg = InstanceMessage(from_instance_id, target_id, message_type, payload)
+            if send_message(registry, msg)
+                count += 1
+            end
+        end
+    end
+    count
+end
+
 function sync_state(
     registry::InstanceRegistry,
     instance_id::String,
@@ -131,11 +202,85 @@ function sync_state(
 end
 
 function get_active_instances(registry::InstanceRegistry)::Vector{Dict{String,Any}}
-    collect(values(registry.instances))
+    instances = []
+    for (id, info) in registry.instances
+        push!(instances, Dict(
+            "instance_id" => id,
+            "registered_at" => info["registered_at"],
+            "last_seen" => info["last_seen"],
+            "is_leader" => info["is_leader"],
+            "connected_to" => get(info, "connected_to", String[]),
+            "is_self" => id == registry.instance_id
+        ))
+    end
+    instances
 end
 
 function get_instance(registry::InstanceRegistry, instance_id::String)::Union{Dict{String,Any},Nothing}
     get(registry.instances, instance_id, nothing)
+end
+
+function get_messages_for_instance(
+    registry::InstanceRegistry,
+    instance_id::String;
+    include_acknowledged::Bool=false
+)::Vector{InstanceMessage}
+    msgs = []
+    for msg in registry.message_queue
+        if msg.to_instance_id == instance_id
+            if include_acknowledged || !msg.acknowledged
+                push!(msgs, msg)
+            end
+        end
+    end
+    msgs
+end
+
+function acknowledge_messages!(
+    registry::InstanceRegistry,
+    instance_id::String,
+    message_ids::Vector{Int64}
+)::Int64
+    count = 0
+    for msg in registry.message_queue
+        if msg.to_instance_id == instance_id && msg.timestamp in message_ids
+            msg.acknowledged = true
+            count += 1
+        end
+    end
+    count
+end
+
+function create_sync_payload(
+    self_model,
+    internal,
+    intelligence,
+    user_model,
+    memory_count::Int64
+)::Dict{String,Any}
+    Dict{String,Any}(
+        "self_model" => Dict(
+            "identity" => self_model.identity,
+            "confidence" => self_model.confidence,
+            "current_state" => string(self_model.current_state)
+        ),
+        "internal" => Dict(
+            "valence" => internal.valence,
+            "arousal" => internal.arousal,
+            "stress_level" => internal.stress_level,
+            "affective_state" => internal.affective_state
+        ),
+        "intelligence" => Dict(
+            "accuracy" => intelligence.accuracy,
+            "total_predictions" => intelligence.total_predictions
+        ),
+        "user_model" => Dict(
+            "topics" => user_model.topics[max(1, end-5):end],
+            "prediction_confidence" => user_model.prediction_confidence
+        ),
+        "memory_count" => memory_count,
+        "timestamp" => string(now())
+    )
 end
 
 function elect_leader(registry::InstanceRegistry)::String
@@ -175,6 +320,28 @@ function clear_message_queue!(registry::InstanceRegistry)::Int64
     count = length(registry.message_queue)
     registry.message_queue = InstanceMessage[]
     count
+end
+
+function cleanup_stale_instances!(registry::InstanceRegistry; stale_minutes::Int=30)::Int64
+    cutoff = now() - Dates.Minute(stale_minutes)
+    stale_ids = String[]
+
+    for (id, info) in registry.instances
+        try
+            last_seen = parse(DateTime, info["last_seen"])
+        catch
+            last_seen = now()
+        end
+        if last_seen < cutoff
+            push!(stale_ids, id)
+        end
+    end
+
+    for id in stale_ids
+        unregister_instance(registry, id)
+    end
+
+    length(stale_ids)
 end
 
 end # module InstanceCommunication

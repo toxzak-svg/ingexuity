@@ -37,9 +37,10 @@ Empathy = accurate prediction + directness + **staying with emotional moments be
 - `railway.json` — health check path, port 8000
 - `git push railway main` — one-click deploy
 
-### 1.4 Basic Micro-Model Inference (Phase 2 start)
-- Load ~150M param Q4 model (ONNX or Flux)
-- Replace template responses with actual model inference
+### 1.4 Julia Transformer Stack (Phase 2 start)
+- Tokenizer: port GPT-2 BPE to Julia (no external vocab dependency)
+- Small baseline transformer: 10-20M params in Flux.jl, trained on Colab GPU
+- Validate full stack: Julia tokenizer → Flux.jl transformer → WASM compile → mobile deploy
 - Target: runs on Railway CPU, <500ms response time
 
 **Deliverable:** A running IngExuity instance at `https://your-app.railway.dev/`. Chat, see predictions, watch User Model build.
@@ -183,6 +184,7 @@ Empathy = accurate prediction + directness + **staying with emotional moments be
 - **Latency:** Voice conversation feels real-time (<500ms response time target)
 - **Portability:** Identity bundle moves between devices, instances run anywhere with the runtime
 - **Language:** Julia everywhere — one codebase, all platforms
+**LLM:** Julia-native transformer (Flux.jl). No Gemma. No external API. Fully offline.
 
 ---
 

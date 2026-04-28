@@ -8,7 +8,7 @@ using Dates
 using ..Types: Prediction, UserModel as UserModelType,
                InternalEmotional as InternalEmotionalType
 
-export predict_trajectory, update_trajectories
+export predict_trajectory, update_trajectories!
 
 const TRAJECTORY_STORE = Dict{String,Any}()
 
@@ -16,6 +16,7 @@ function predict_trajectory(user_model::UserModelType, internal::InternalEmotion
     predictions = Prediction[]
     now_ts = now()
     emotional = user_model.emotional_patterns
+    temporal = user_model.temporal_patterns
 
     temporal = user_model.temporal_patterns
     if haskey(temporal, "stress_cycles")
@@ -29,11 +30,14 @@ function predict_trajectory(user_model::UserModelType, internal::InternalEmotion
             end
             if !isempty(intervals)
                 avg_interval = sum(intervals) / length(intervals)
+                std_interval = length(intervals) > 1 ? std(intervals) : 0.0
                 if avg_interval > 0 && avg_interval < 168
+                    confidence = 0.6 + (0.1 * min(length(cycles) / 5, 1.0))
+                    confidence = min(confidence, 0.85)
                     push!(predictions, Prediction(
-                        "stress cycle recurring approximately every $(round(avg_interval, digits=1)) hours",
+                        "stress cycle recurring approximately every $(round(avg_interval, digits=1)) hours (±$(round(std_interval, digits=1)))",
                         "temporal stress pattern",
-                        0.7,
+                        confidence,
                         [:user_model, :memory],
                         now_ts
                     ))
@@ -43,11 +47,12 @@ function predict_trajectory(user_model::UserModelType, internal::InternalEmotion
     end
 
     stress_triggers = get(emotional, "stress_triggers", String[])
-    if length(stress_triggers) >= 3
+    if length(stress_triggers) >= 2
+        confidence = min(0.6 + length(stress_triggers) * 0.05, 0.85)
         push!(predictions, Prediction(
-            "user has recurring stress triggers — approach carefully",
+            "user has recurring stress triggers: $(join(stress_triggers[1:min(3,end)], ", "))$(length(stress_triggers) > 3 ? "..." : "")",
             "stress trigger pattern",
-            0.8,
+            confidence,
             [:user_model],
             now_ts
         ))
@@ -55,24 +60,45 @@ function predict_trajectory(user_model::UserModelType, internal::InternalEmotion
 
     if haskey(temporal, "topic_recurrence")
         rec = temporal["topic_recurrence"]
-        if haskey(rec, "count") && rec["count"] >= 3
+        if haskey(rec, "count") && rec["count"] >= 2
             last_topic = get(rec, "last_topic", "unknown")
+            confidence = min(0.5 + rec["count"] * 0.1, 0.8)
             push!(predictions, Prediction(
-                "$last_topic will likely return soon",
+                "$last_topic will likely return soon (seen $(rec["count"]) times)",
                 "topic recurrence",
-                min(0.5 + rec["count"] * 0.1, 0.85),
+                confidence,
                 [:user_model, :memory],
                 now_ts
             ))
         end
     end
 
-    if get(emotional, "times_stayed_present", 0) > 5
+    if get(emotional, "times_stayed_present", 0) > 3
         push!(predictions, Prediction(
-            "user values presence over solutions — continue approach",
+            "user values presence over solutions — continue present approach",
             "presence preference",
+            0.7,
+            [:user_model],
+            now_ts
+        ))
+    end
+
+    if get(emotional, "is_quiet", false) && get(emotional, "quiet_count", 0) > 5
+        push!(predictions, Prediction(
+            "user has extended withdrawal pattern — expect continued brevity",
+            "extended withdrawal",
             0.75,
             [:user_model],
+            now_ts
+        ))
+    end
+
+    if internal.stress_level > 0.6
+        push!(predictions, Prediction(
+            "user stress elevated — watch for escalation or crash",
+            "stress trajectory",
+            internal.stress_level,
+            [:internal_emotional],
             now_ts
         ))
     end
@@ -114,6 +140,19 @@ function update_trajectories!(user_model::UserModelType, internal::InternalEmoti
             deflections = deflections[end-9:end]
         end
         emotional["deflection_history"] = deflections
+    elseif event_type == "emotional_shift"
+        shift = get(event_data, "direction", "neutral")
+        if shift == "negative"
+            shifts = get!(temporal, "negative_shifts", Int[])
+            push!(shifts, 1)
+            if length(shifts) > 20
+                shifts = shifts[end-19:end]
+            end
+            temporal["negative_shifts"] = shifts
+        end
+    elseif event_type == "stayed_present"
+        count = get!(emotional, "times_stayed_present", 0)
+        emotional["times_stayed_present"] = count + 1
     end
 
     user_model.temporal_patterns = temporal

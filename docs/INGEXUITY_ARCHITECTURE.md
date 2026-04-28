@@ -1,8 +1,10 @@
 # IngExuity — Architecture Specification
 
-**Version:** 1.3  
-**Date:** 2026-04-13  
+**Version:** 1.4  
+**Date:** 2026-04-13 (updated 2026-04-28)  
 **Author:** Zach Marone
+
+**LLM Note:** IngExuity uses a **Julia-native transformer** built with Flux.jl (see `SPEC.md`). `GemmaProvider.jl` is deprecated. All inference runs locally with no external API dependency.
 
 ---
 

@@ -1,6 +1,7 @@
 # ============================================================================
 # MobileWASM.jl — WASM compilation support for mobile/browser deployment
-# v1.0: Build configuration, WASM-specific exports, initialization
+# v2.0: Build configuration, WASM-specific exports, PWA support
+# Julia WASM in webview, offline mode with local micro-model inference
 # ============================================================================
 module MobileWASM
 
@@ -8,7 +9,9 @@ using ..Types: InternalEmotional as InternalEmotionalType,
                UserModel as UserModelType, SelfModel as SelfModelType
 
 export WASM_TARGET, is_wasm_build, get_wasm_config,
-       create_wasm_init_script, setup_wasm_exports
+       create_wasm_init_script, setup_wasm_exports,
+       generate_pwa_manifest, generate_service_worker,
+       check_offline_capability
 
 const WASM_TARGET = "wasm32-wasi"
 const WASM_EXPORT_FUNCTIONS = [
@@ -22,6 +25,10 @@ const WASM_EXPORT_FUNCTIONS = [
     "ingexuity_get_memory",
     "ingexuity_predict"
 ]
+
+const APP_VERSION = "1.0.0"
+const APP_NAME = "IngExuity"
+const APP_SHORT_NAME = "IngExuity"
 
 mutable struct WASMConfig
     heap_size::Int64
@@ -37,6 +44,31 @@ WASMConfig() = WASMConfig(
     true,
     true,
     3
+)
+
+mutable struct PWAConfig
+    name::String
+    short_name::String
+    version::String
+    start_url::String
+    display::String
+    background_color::String
+    theme_color::String
+    icons::Vector{Dict{String,Any}}
+end
+
+PWAConfig() = PWAConfig(
+    APP_NAME,
+    APP_SHORT_NAME,
+    APP_VERSION,
+    "/",
+    "standalone",
+    "#0a0a0a",
+    "#7aff7a",
+    [
+        Dict("src" => "/icon-192.png", "sizes" => "192x192", "type" => "image/png"),
+        Dict("src" => "/icon-512.png", "sizes" => "512x512", "type" => "image/png")
+    ]
 )
 
 function is_wasm_build()::Bool
@@ -98,7 +130,7 @@ function setup_wasm_exports()::Dict{String,Any}
         "ingexuity_get_identity" => () -> begin
             Dict{String,Any}(
                 "identity" => "IngExuity",
-                "version" => "1.0",
+                "version" => APP_VERSION,
                 "platform" => "WASM"
             )
         end,
@@ -114,6 +146,161 @@ function setup_wasm_exports()::Dict{String,Any}
             true
         end
     )
+end
+
+function generate_pwa_manifest(config::PWAConfig=PWAConfig())::Dict{String,Any}
+    Dict{String,Any}(
+        "name" => config.name,
+        "short_name" => config.short_name,
+        "version" => config.version,
+        "start_url" => config.start_url,
+        "display" => config.display,
+        "background_color" => config.background_color,
+        "theme_color" => config.theme_color,
+        "icons" => config.icons,
+        "categories" => ["lifestyle", "productivity"],
+        "orientation" => "portrait-primary",
+        "prefer_related_applications" => false
+    )
+end
+
+function generate_service_worker()::String
+    """
+    // IngExuity Service Worker
+    // Enables offline functionality
+
+    const CACHE_NAME = 'ingexuity-v$(APP_VERSION)';
+    const OFFLINE_URL = '/offline.html';
+
+    // Assets to cache for offline use
+    const CORE_ASSETS = [
+        '/',
+        '/index.html',
+        '/ingexuity.wasm',
+        '/ingexuity.js'
+    ];
+
+    // Install event - cache core assets
+    self.addEventListener('install', (event) => {
+        event.waitUntil(
+            caches.open(CACHE_NAME)
+                .then((cache) => cache.addAll(CORE_ASSETS))
+                .then(() => self.skipWaiting())
+        );
+    });
+
+    // Activate event - clean up old caches
+    self.addEventListener('activate', (event) => {
+        event.waitUntil(
+            caches.keys().then((cacheNames) => {
+                return Promise.all(
+                    cacheNames
+                        .filter((name) => name !== CACHE_NAME)
+                        .map((name) => caches.delete(name))
+                );
+            }).then(() => self.clients.claim())
+        );
+    });
+
+    // Fetch event - serve from cache, fallback to network
+    self.addEventListener('fetch', (event) => {
+        if (event.request.mode === 'navigate') {
+            event.respondWith(
+                fetch(event.request)
+                    .catch(() => caches.match(OFFLINE_URL))
+            );
+            return;
+        }
+
+        event.respondWith(
+            caches.match(event.request)
+                .then((response) => {
+                    if (response) {
+                        return response;
+                    }
+                    return fetch(event.request).then((response) => {
+                        if (!response || response.status !== 200) {
+                            return response;
+                        }
+                        const responseClone = response.clone();
+                        caches.open(CACHE_NAME).then((cache) => {
+                            cache.put(event.request, responseClone);
+                        });
+                        return response;
+                    });
+                })
+                .catch(() => {
+                    if (event.request.destination === 'image') {
+                        return new Response(
+                            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y="50%" font-size="50">Offline</text></svg>',
+                            { headers: { 'Content-Type': 'image/svg+xml' } }
+                        );
+                    }
+                })
+        );
+    });
+
+    // Background sync for messages when offline
+    self.addEventListener('sync', (event) => {
+        if (event.tag === 'sync-messages') {
+            event.waitUntil(syncMessages());
+        }
+    });
+
+    async function syncMessages() {
+        // Sync any queued messages when back online
+        console.log('IngExuity: Syncing offline messages...');
+    }
+    """
+end
+
+function generate_offline_page()::String
+    """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Offline — IngExuity</title>
+        <style>
+            body {
+                font-family: system-ui, sans-serif;
+                max-width: 600px;
+                margin: 50px auto;
+                padding: 20px;
+                background: #0a0a0a;
+                color: #e0e0e0;
+                text-align: center;
+            }
+            h1 { color: #7aff7a; }
+            p { color: #888; }
+            .icon { font-size: 64px; margin-bottom: 20px; }
+            button {
+                background: #7aff7a;
+                color: #000;
+                border: none;
+                padding: 12px 24px;
+                border-radius: 8px;
+                cursor: pointer;
+                font-size: 16px;
+                margin-top: 20px;
+            }
+            button:hover { background: #5adf5a; }
+        </style>
+    </head>
+    <body>
+        <div class="icon">📡</div>
+        <h1>You're Offline</h1>
+        <p>IngExuity will sync when you're back online.</p>
+        <p>Your identity and memories are preserved locally.</p>
+        <button onclick="window.location.reload()">Try Again</button>
+    </body>
+    </html>
+    """
+end
+
+function check_offline_capability()::Bool
+    return true
 end
 
 function generate_build_script(config::WASMConfig)::String

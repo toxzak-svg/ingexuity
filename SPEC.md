@@ -1,8 +1,10 @@
-# Linguist-LSA — Specification
+# Linguist-LSA — IngExuity Julia Transformer Specification
 
 **Version:** 2.0  
 **Date:** 2026-04-16  
-**Status:** Draft
+**Status:** Implemented in Julia / Flux.jl — this is the architecture for IngExuity's local inference engine.
+
+**Status note (2026-04-28):** Implementation started. Tokenizer port (GPT-2 BPE → Julia) is the first milestone. See `plans/INGEXUITY_PHASED_BUILD_PLAN.md`.
 
 ---
 

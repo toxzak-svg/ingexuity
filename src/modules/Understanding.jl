@@ -1,6 +1,7 @@
 # ============================================================================
 # Understanding.jl — Interpret and learn from conversations
-# v3: Closes the loop between predictions, memory, and intelligence
+# v4: Closes the loop between predictions, memory, and intelligence
+# Memory.store called after each exchange with validity windows
 # ============================================================================
 module Understanding
 
@@ -12,13 +13,22 @@ export interpret, close_learning_loop!, assess_prediction_accuracy
 
 export update_memory_from_interaction!, update_intelligence_from_outcome!
 
+const VALIDITY_WINDOWS = Dict{Symbol,Int}(
+    :topic => 24,
+    :emotional_state => 4,
+    :prediction_pattern => 72,
+    :user_preference => 168,
+    :stress_cycle => 168
+)
+
 function interpret(human_input, response, predictions, reaction)::Dict{Symbol,Any}
     Dict{Symbol,Any}(
         :understood => true,
         :learning => length(predictions) > 0,
         :confidence => length(predictions) > 0 ? mean([p.confidence for p in predictions]) : 0.5,
         :prediction_count => length(predictions),
-        :reaction_summary => summarize_reaction(reaction)
+        :reaction_summary => summarize_reaction(reaction),
+        :validity_windows => VALIDITY_WINDOWS
     )
 end
 
@@ -29,7 +39,6 @@ end
 
 function summarize_reaction(reaction::Dict)::String
     action = get(reaction, :action, "unknown")
-    sentiment = get(reaction, :sentiment, "neutral")
 
     if action == "continued"
         "user engaged further"
@@ -58,14 +67,44 @@ function close_learning_loop!(human_input, response,
         :outcomes => outcomes,
         :confidence_delta => confidence_gain,
         :pattern_detected => detect_learning_pattern(predictions, surviving_predictions, reaction),
-        :feedback_applied => false
+        :feedback_applied => false,
+        :validity_updates => Dict{Symbol,Int}()
     )
 
     if outcomes[:prediction_accuracy] > 0.6
         learning_signal[:feedback_applied] = true
+        learning_signal[:validity_updates][:prediction_pattern] = VALIDITY_WINDOWS[:prediction_pattern]
+    end
+
+    if memory_store !== nothing
+        store_learning_as_memory!(memory_store, predictions, surviving_predictions, reaction, learning_signal)
     end
 
     learning_signal
+end
+
+function store_learning_as_memory!(memory_store, predictions, surviving_predictions,
+                                   reaction, learning_signal)
+    accuracy = learning_signal[:outcomes][:prediction_accuracy]
+
+    if accuracy > 0.6
+        memory_store("Prediction accuracy: $accuracy (high confidence patterns)",
+                    source=:learning, validity_hours=VALIDITY_WINDOWS[:prediction_pattern])
+    end
+
+    reaction_action = reaction[:action]
+    if reaction_action in ["continued", "escalated"]
+        memory_store("User engaged positively with predictions",
+                    source=:learning, validity_hours=VALIDITY_WINDOWS[:user_preference])
+    end
+
+    for pred in surviving_predictions
+        need = pred.predicted_need
+        memory_store("Confirmed need: $need",
+                    source=:learning, validity_hours=VALIDITY_WINDOWS[:prediction_pattern])
+    end
+
+    nothing
 end
 
 function analyze_outcomes(predictions::Vector{Prediction},
@@ -122,18 +161,21 @@ function update_memory_from_interaction!(human_input, response,
 
     topic = get(comprehension, :topic, :general)
     if !isempty(string(topic)) && string(topic) != "general"
-        memory_store("Topic: $topic", source=:understanding)
+        memory_store("Topic: $topic", source=:understanding,
+                    validity_hours=VALIDITY_WINDOWS[:topic])
     end
 
     emotional_tone = get(comprehension, :emotional_tone, "")
     if !isempty(emotional_tone)
-        memory_store("Emotional tone: $emotional_tone", source=:understanding)
+        memory_store("Emotional tone: $emotional_tone", source=:understanding,
+                    validity_hours=VALIDITY_WINDOWS[:emotional_state])
     end
 
     is_question = get(comprehension, :is_question, false)
     if is_question
         memory_store("User asked a question about: $(get(comprehension, :topic, "general"))",
-                     source=:understanding)
+                     source=:understanding,
+                     validity_hours=VALIDITY_WINDOWS[:topic])
     end
 
     nothing
@@ -191,8 +233,8 @@ function infer_user_satisfaction(human_input, response,
                                   surviving_predictions::Vector{Prediction})::Float64
     input_lower = lowercase(human_input.raw)
 
-    positive_indicators = ["thanks", "thank you", "that helps", "good", "great", "perfect", "yes"]
-    negative_indicators = ["nevermind", "forget it", "whatever", "not really", "i guess", "meh"]
+    positive_indicators = ["thanks", "thank you", "that helps", "good", "great", "perfect", "yes", "awesome"]
+    negative_indicators = ["nevermind", "forget it", "whatever", "not really", "i guess", "meh", "whatever"]
 
     pos_count = sum(1 for w in positive_indicators if occursin(w, input_lower))
     neg_count = sum(1 for w in negative_indicators if occursin(w, input_lower))

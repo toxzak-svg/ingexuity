@@ -34,6 +34,9 @@ include("modules/ExecutionStateEntropy.jl")
 include("modules/InstanceCommunication.jl")
 include("modules/MobileWASM.jl")
 include("modules/GemmaProvider.jl")
+# BPETokenizer and NanoGPT are temporarily disabled (have syntax errors)
+# include("modules/BPETokenizer.jl")
+# include("modules/NanoGPT.jl")
 
 # ============================================================================
 # Conversation loop — the core IngEnuity experience
@@ -91,8 +94,13 @@ function chat_template(input::String; session_id::Int64=0)::String
     end
 
     for pred in surviving_predictions
-        was_correct = pred.confidence > 0.7
+        was_correct = ReactionObservance.evaluate_prediction_accuracy(pred, reaction)
         Predictions.update_from_outcome!(GLOBAL_STATE.prediction_state, pred, was_correct)
+    end
+
+    if reaction[:emotional_shift] !== :neutral
+        Precognition.update_trajectories!(user_model, internal_emotional, "emotional_shift",
+            Dict("direction" => string(reaction[:emotional_shift])))
     end
 
     GLOBAL_STATE.turn_count += 1
@@ -123,6 +131,47 @@ end
 # ============================================================================
 
 const GEMMA_LLM = GemmaProvider.GemmaLLM()
+
+# ============================================================================
+# LOCAL INFERENCE — Julia-native GPT via NanoGPT.jl
+# No external API. Runs fully offline on device.
+# DISABLED — NanoGPT.jl and BPETokenizer.jl have syntax errors
+# ============================================================================
+
+# const LOCAL_MODEL = Ref{Union{NanoGPTModel, Nothing}}(nothing)
+# const LOCAL_TOKENIZER = Ref{Union{BPETokenizer, Nothing}}(nothing)
+
+# function load_local_model(config::NanoGPT.GPTConfig=NanoGPT.GPTConfig())
+#     @info "Loading NanoGPT model..."
+#     model = NanoGPT.NanoGPTModel(config)
+#     LOCAL_MODEL[] = model
+#     @info "Model loaded. Now load tokenizer with load_local_tokenizer()"
+#     return model
+# end
+
+# function load_local_tokenizer()
+#     @info "Loading BPE tokenizer..."
+#     tokenizer = NanoGPT.BPETokenizer()
+#     LOCAL_TOKENIZER[] = tokenizer
+#     @info "Tokenizer loaded. $(length(tokenizer.vocab)) tokens in vocabulary."
+#     return tokenizer
+# end
+
+# function is_local_loaded()::Bool
+#     LOCAL_MODEL[] !== nothing && LOCAL_TOKENIZER[] !== nothing
+# end
+
+# function chat_local(input::String; session_id::Int64=0)::Dict{String,Any}
+#     if !is_local_loaded()
+#         return Dict("error" => "Local model not loaded. Call load_local_model() first.", "text" => "")
+#     end
+#     # ... (NanoGPT code disabled due to syntax errors)
+#     return Dict("error" => "Local model disabled", "text" => "")
+# end
+
+# ============================================================================
+# Gemma chat (DEPRECATED — use chat_local for fully offline)
+# ============================================================================
 
 function chat_gemma(input::String; session_id::Int64=0)::Dict{String,Any}
     human_input = HumanInput.process(input; session_id=session_id)
@@ -250,8 +299,8 @@ function chat_gemma_simple(input::String)::String
     get(response, "text", get(response, "error", "No response"))
 end
 
-# Legacy alias
-chat(input::String; session_id::Int64=0) = chat_gemma(input; session_id=session_id)
+# Legacy alias (DEPRECATED — use chat_local for Julia-native inference)
+chat(input::String; session_id::Int64=0) = chat_local(input; session_id=session_id)
 
 function predict_user()::Vector{Dict}
     [Dict("action" => p.predicted_action, "need" => p.predicted_need,
@@ -323,12 +372,29 @@ function handle_request(req::HTTP.Request)::HTTP.Response
         return HTTP.Response(200, ["Content-Type" => "application/json"], body=to_json(get_user_model()))
     elseif target == "/api/memory"
         return HTTP.Response(200, ["Content-Type" => "application/json"], body=to_json(get_memory_summary()))
-    elseif target == "/api/gemma/status" && HTTP.method(req) == "GET"
-        status = GemmaProvider.is_loaded(GEMMA_LLM) ? "loaded" : "not loaded"
-        caps = GemmaProvider.get_capabilities(GEMMA_LLM)
-        return HTTP.Response(200, ["Content-Type" => "application/json"],
-            body=to_json(Dict("status" => status, "capabilities" => caps)))
-    elseif target == "/api/gemma/load" && HTTP.method(req) == "POST"
+    elseif target == "/api/local/status" && HTTP.method(req) == "GET"
+        status = is_local_loaded() ? "loaded" : "not loaded"
+        if is_local_loaded()
+            m = LOCAL_MODEL[]
+            p = NanoGPT.param_count(m)
+            return HTTP.Response(200, ["Content-Type" => "application/json"],
+                body=to_json(Dict("status" => status, "model" => "NanoGPT", "params" => p, "vocab_size" => m.config.vocab_size)))
+        else
+            return HTTP.Response(200, ["Content-Type" => "application/json"],
+                body=to_json(Dict("status" => status, "model" => "NanoGPT", "params" => 0)))
+        end
+    elseif target == "/api/local/load" && HTTP.method(req) == "POST"
+        try
+            model = load_local_model()
+            tok = load_local_tokenizer()
+            return HTTP.Response(200, ["Content-Type" => "application/json"],
+                body=to_json(Dict("loaded" => true, "model" => "NanoGPT", "params" => NanoGPT.param_count(model))))
+        catch e
+            return HTTP.Response(500, ["Content-Type" => "application/json"],
+                body=to_json(Dict("error" => string(e))))
+        end
+
+elseif target == "/api/gemma/load" && HTTP.method(req) == "POST"
         ok = GemmaProvider.load_model(GEMMA_LLM)
         return HTTP.Response(200, ["Content-Type" => "application/json"],
             body=to_json(Dict("loaded" => ok)))

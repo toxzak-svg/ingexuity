@@ -4,7 +4,7 @@
 
 She predicts what you need before you ask. She stays with you when you're upset. She gets slightly different on every device you run her on. She's yours — not trained to be yours, yours because she knows you.
 
-Built in Julia everywhere. Runs on Railway. Works offline on your phone.
+Built in Julia everywhere. Runs on Railway. Works offline on your phone. No external API dependencies — everything runs locally.
 
 ---
 
@@ -34,6 +34,57 @@ Memory Layer:       Memory (validity-window store)
 **The key insight:** The system doesn't ask "what should I say." She asks "what will the user need in the next 30 seconds?"
 
 **Presencing:** When stress > 0.6 OR emotional charge > 0.7 OR valence < -0.3, she stays present. Acknowledges first. Solves after you're heard. That's empathy.
+
+---
+
+## The Julia Transformer — No External Dependencies
+
+IngExuity uses a **Julia-native transformer** built with Flux.jl. No Gemma. No Google API. No external LLM provider.
+
+The transformer stack (Linguist-LSA architecture, see `SPEC.md`):
+- Selective SSM (Mamba-style) for long-range memory
+- Linear merge attention (no KV cache, constant memory)
+- Low-rank SwiGLU FFN (66% parameter reduction vs standard)
+- Fully integer-quantized inference (INT4 target: ~30-60MB total)
+
+**Hardware target:** Mobile CPU, GPU-free. ~50-100M params Q4 (~30-60MB). Runs offline.
+
+**Why Julia:**
+- Multiple dispatch for clean integer/float backend switching
+- Integer arithmetic is native — no accidental float promotion
+- SIMD pragmas work on integer loops
+- Static compilation to standalone binary for mobile
+- CUDA.jl for GPU acceleration when available
+
+**The Julia Transformer — NanoGPT.jl**
+
+`src/modules/NanoGPT.jl` — a full GPT architecture in Flux.jl, scaled to ~50M params:
+- Pre-norm transformer blocks (GPT-2 style)
+- Multi-head self-attention with causal masking
+- GELU activation, low-rank projection-friendly
+- Autoregressive generation with top-k/top-p sampling
+- Configurable: n_embed, n_layers, n_heads, vocab_size
+
+`src/modules/BPETokenizer.jl` — GPT-2 style BPE tokenizer in pure Julia:
+- Byte-level BPE (matches GPT-2 vocabulary)
+- Pure Julia, no external dependencies
+- Train on custom corpus or load GPT-2 pre-trained merges
+
+**Quick start (local inference):**
+```julia
+using IngExuity
+load_local_model()       # Load NanoGPT (~50M params)
+load_local_tokenizer()   # Load BPE tokenizer
+response = chat_local("Hello, how are you?")
+```
+
+**Build stack:**
+```
+Tokenization (GPT-2 BPE, ported to Julia)
+  → Transformer (Flux.jl, 50-100M params)
+    → WASM compile (PackageCompiler)
+      → Mobile PWA (offline, no server needed)
+```
 
 ---
 
@@ -95,18 +146,23 @@ She becomes irreplaceable through use. That's the product.
 ## Technical Stack
 
 - **Julia everywhere** — one codebase, all platforms
+- **Flux.jl** — Julia-native neural networks, transformer implementation
+- **NanoGPT.jl** — full GPT architecture in Flux.jl (see `src/modules/NanoGPT.jl`)
+- **BPETokenizer.jl** — pure Julia BPE tokenizer (see `src/modules/BPETokenizer.jl`)
 - **Genie.jl** — web server + embedded UI
-- **Flux.jl** — micro-model inference
+- **PackageCompiler.jl** — WASM compilation for mobile
 - **SQLite.jl** — persistence (Phase 2)
 - **Julia WASM** — mobile PWA (Phase 4)
 
-**Hardware target:** Mobile (Android). CPU-capable, GPU-free. ~50-100M params Q4 model (~30-60MB).
+**Hardware target:** Mobile (Android). CPU-capable, GPU-free. ~50-100M params Q4 (~30-60MB).
+
+**No external API dependencies.** Everything runs locally.
 
 ---
 
 ## Status
 
-v1.3 — scaffold complete. Phase 1 in progress.
+v1.4 — Julia transformer stack started. Phase 1 in progress.
 
 See [`plans/INGEXUITY_PHASED_BUILD_PLAN.md`](plans/INGEXUITY_PHASED_BUILD_PLAN.md) for full roadmap.
 

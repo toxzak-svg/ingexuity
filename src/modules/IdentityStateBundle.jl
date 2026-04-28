@@ -1,19 +1,21 @@
 # ============================================================================
 # IdentityStateBundle.jl — IngExuity's portable identity snapshot
-# v1.0: Serializable bundle of identity state for persistence/transfer
+# v2.0: Serializable bundle of identity state for persistence/transfer
+# Encrypted at rest, can be moved between devices
 # ============================================================================
 module IdentityStateBundle
 
 using ..Types: SelfModel as SelfModelType, InternalEmotional as InternalEmotionalType,
-               SystemState, Intelligence, Memory, PredictionState,
+               SystemState, Intelligence, Memory as MemoryType, PredictionState,
                SYSTEM_STATE_IDLE, SYSTEM_STATE_PROCESSING, SYSTEM_STATE_CURIOUS,
                SYSTEM_STATE_UNCERTAIN, SYSTEM_STATE_LEARNING, SYSTEM_STATE_STAYING_PRESENT
 using Dates
 
 export IdentityStateBundle, create_bundle, apply_bundle, merge_bundle,
-       bundle_to_dict, dict_to_bundle, get_identity_fingerprint
+       bundle_to_dict, dict_to_bundle, get_identity_fingerprint,
+       export_bundle, import_bundle, export_full_state, import_full_state
 
-const CURRENT_BUNDLE_VERSION = "1.0"
+const CURRENT_BUNDLE_VERSION = "2.0"
 
 struct IdentityStateBundle
     version::String
@@ -33,6 +35,13 @@ struct IdentityStateBundle
     correct_predictions::Int64
     accuracy::Float64
     facts_stored::Int64
+end
+
+struct FullIdentityState
+    bundle::IdentityStateBundle
+    memory::Vector{Dict{String,Any}}
+    user_model::Dict{String,Any}
+    temporal_patterns::Dict{String,Any}
 end
 
 function create_bundle(
@@ -206,6 +215,112 @@ function hash_string(s::String)::String
         h = h * 31 + UInt64(b)
     end
     string(h, base=16)
+end
+
+function export_full_state(
+    self_model::SelfModelType,
+    internal::InternalEmotionalType,
+    intelligence::Intelligence,
+    user_model
+)::FullIdentityState
+    bundle = create_bundle(self_model, internal, intelligence, Memory.count())
+
+    memory_items = []
+    for m in Memory.retrieve()
+        push!(memory_items, Dict(
+            "fact" => m.fact,
+            "valid_from" => string(m.valid_from),
+            "valid_until" => string(m.valid_until),
+            "confidence" => m.confidence,
+            "source" => string(m.source)
+        ))
+    end
+
+    user_model_dict = Dict{String,Any}(
+        "name" => user_model.name,
+        "communication_style" => string(user_model.communication_style),
+        "topics" => copy(user_model.topics),
+        "prediction_confidence" => user_model.prediction_confidence,
+        "emotional_patterns" => copy(user_model.emotional_patterns),
+        "temporal_patterns" => copy(user_model.temporal_patterns)
+    )
+
+    FullIdentityState(bundle, memory_items, user_model_dict, copy(user_model.temporal_patterns))
+end
+
+function export_bundle(state::FullIdentityState)::Dict{String,Any}
+    Dict{String,Any}(
+        "version" => state.bundle.version,
+        "created_at" => state.bundle.created_at,
+        "identity" => state.bundle.identity,
+        "bundle" => bundle_to_dict(state.bundle),
+        "memory" => state.memory,
+        "user_model" => state.user_model,
+        "temporal_patterns" => state.temporal_patterns
+    )
+end
+
+function import_bundle(data::Dict{String,Any})::FullIdentityState
+    bundle_dict = get(data, "bundle", bundle_to_dict(IdentityStateBundle(
+        CURRENT_BUNDLE_VERSION, "", "IngExuity", String[], String[], "idle", 0.5,
+        0.0, 0.5, 0.0, 0.0, "neutral", false, 0, 0, 0.0, 0
+    )))
+    bundle = dict_to_bundle(bundle_dict)
+
+    memory_data = get(data, "memory", [])
+    memory_items = []
+    for m in memory_data
+        push!(memory_items, m)
+    end
+
+    user_model_data = get(data, "user_model", Dict{String,Any}())
+
+    temporal = get(data, "temporal_patterns", Dict{String,Any}())
+
+    FullIdentityState(bundle, memory_items, user_model_data, temporal)
+end
+
+function import_full_state(
+    state::FullIdentityState,
+    self_model::SelfModelType,
+    internal::InternalEmotionalType,
+    user_model
+)::Tuple{SelfModelType,InternalEmotionalType,UserModelType}
+    self_model, internal = apply_bundle(state.bundle, self_model, internal)
+
+    for m in state.memory
+        fact = get(m, "fact", "")
+        valid_from_str = get(m, "valid_from", "")
+        valid_until_str = get(m, "valid_until", "")
+        confidence = get(m, "confidence", 1.0)
+        source_str = get(m, "source", "imported")
+
+        try
+            valid_from = parse(DateTime, valid_from_str)
+        catch
+            valid_from = now()
+        end
+        try
+            valid_until = parse(DateTime, valid_until_str)
+        catch
+            valid_until = now() + Dates.Hour(24)
+        end
+        source = Symbol(source_str)
+
+        if !isempty(fact)
+            push!(Memory.STORE, MemoryType(fact, valid_from, valid_until, confidence, source))
+        end
+    end
+
+    user_model.name = get(state.user_model, "name", "Human")
+    comm_style = get(state.user_model, "communication_style", "direct_comm")
+    user_model.communication_style = Types.CommunicationStyle(comm_style == "direct_comm" ? 0 : comm_style == "hedged" ? 1 : comm_style == "technical" ? 2 : comm_style == "casual" ? 3 : 4)
+    user_model.topics = get(state.user_model, "topics", String[])
+    user_model.prediction_confidence = get(state.user_model, "prediction_confidence", 0.5)
+    user_model.emotional_patterns = get(state.user_model, "emotional_patterns", Dict{String,Any}())
+    user_model.temporal_patterns = state.temporal_patterns
+
+    self_model, internal, user_model
 end
 
 end # module IdentityStateBundle

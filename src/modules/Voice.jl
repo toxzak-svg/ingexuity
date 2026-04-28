@@ -1,6 +1,6 @@
 # ============================================================================
 # Voice.jl — Determine tone and voice modulation
-# v2: Richer tone determination integrating self model and user patterns
+# v3: Richer tone determination integrating self model, user patterns, and empathy
 # ============================================================================
 module Voice
 
@@ -11,11 +11,13 @@ using ..Types: ResponseTone, COMMUNICATION_STYLE_CURIOUS,
                InternalEmotional as InternalEmotionalType,
                UserModel as UserModelType
 
-export determine_tone, adjust_for_self_model, compute_voice_modulation
+export determine_tone, adjust_for_self_model, compute_voice_modulation,
+       compute_tone_for_stay_present, get_empathy_modulation
 
 function determine_tone(internal::InternalEmotionalType,
                        user_model::UserModelType,
-                       reaction::Dict)::Symbol
+                       reaction::Dict;
+                       self_confidence::Float64=0.5)::Symbol
     if internal.should_stay_present || internal.stress_level > 0.6
         return :staying_present
     elseif internal.stress_level > 0.4
@@ -51,6 +53,23 @@ function determine_tone(internal, user_model, reaction)::Symbol
     end
 end
 
+function compute_tone_for_stay_present(internal::InternalEmotionalType,
+                                       user_model::UserModelType)::Symbol
+    emotional = user_model.emotional_patterns
+    is_quiet = get(emotional, "is_quiet", false)
+    times_stayed = get(emotional, "times_stayed_present", 0)
+
+    if is_quiet || times_stayed > 3
+        return :minimal
+    elseif internal.stress_level > 0.7
+        return :warm
+    elseif internal.valence < -0.3
+        return :warm
+    else
+        return :staying_present
+    end
+end
+
 function adjust_for_self_model(tone::Symbol, self_model_state::Symbol,
                                  self_confidence::Float64)::Symbol
     if self_confidence < 0.4
@@ -62,7 +81,7 @@ function adjust_for_self_model(tone::Symbol, self_model_state::Symbol,
     end
 
     if self_model_state == :uncertain || self_model_state == :learning
-        return min(tone, :warm)
+        return min_tone(tone, :warm)
     end
 
     tone
@@ -85,6 +104,24 @@ function compute_voice_modulation(internal::InternalEmotionalType,
     modulation
 end
 
+function get_empathy_modulation(internal::InternalEmotionalType,
+                                 user_model::UserModelType)::Float64
+    base = 0.5
+
+    emotional = user_model.emotional_patterns
+    times_stayed = get(emotional, "times_stayed_present", 0)
+
+    empathy = base + min(times_stayed * 0.03, 0.3)
+
+    if internal.affective_state in ["warm", "content", "joyful"]
+        empathy = min(empathy + 0.1, 0.95)
+    elseif internal.affective_state in ["anxious", "overwhelmed", "frustrated"]
+        empathy = max(empathy - 0.15, 0.3)
+    end
+
+    empathy
+end
+
 function tone_to_response_tone(tone::Symbol)::ResponseTone
     tone === :direct && return RESPONSE_TONE_DIRECT
     tone === :warm && return RESPONSE_TONE_WARM
@@ -95,7 +132,7 @@ function tone_to_response_tone(tone::Symbol)::ResponseTone
     RESPONSE_TONE_DIRECT
 end
 
-function min(a::Symbol, b::Symbol)::Symbol
+function min_tone(a::Symbol, b::Symbol)::Symbol
     order = [:staying_present, :warm, :minimal, :curious, :direct, :playful]
     idx_a = findfirst(isequal(a), order)
     idx_b = findfirst(isequal(b), order)
