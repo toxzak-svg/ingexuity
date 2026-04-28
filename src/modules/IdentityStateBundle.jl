@@ -11,13 +11,13 @@ using ..Types: SelfModel as SelfModelType, InternalEmotional as InternalEmotiona
                SYSTEM_STATE_UNCERTAIN, SYSTEM_STATE_LEARNING, SYSTEM_STATE_STAYING_PRESENT
 using Dates
 
-export IdentityStateBundle, create_bundle, apply_bundle, merge_bundle,
+export IdentityBundle, create_bundle, apply_bundle, merge_bundle,
        bundle_to_dict, dict_to_bundle, get_identity_fingerprint,
        export_bundle, import_bundle, export_full_state, import_full_state
 
 const CURRENT_BUNDLE_VERSION = "2.0"
 
-struct IdentityStateBundle
+struct IdentityBundle
     version::String
     created_at::String
     identity::String
@@ -49,7 +49,7 @@ function create_bundle(
     internal::InternalEmotionalType,
     intelligence::Intelligence,
     fact_count::Int64
-)::IdentityStateBundle
+)::IdentityBundle
     state_map = Dict{SystemState,String}(
         SYSTEM_STATE_IDLE => "idle",
         SYSTEM_STATE_PROCESSING => "processing",
@@ -59,7 +59,7 @@ function create_bundle(
         SYSTEM_STATE_STAYING_PRESENT => "staying_present"
     )
 
-    IdentityStateBundle(
+    IdentityBundle(
         CURRENT_BUNDLE_VERSION,
         string(now()),
         self_model.identity,
@@ -80,7 +80,7 @@ function create_bundle(
     )
 end
 
-function bundle_to_dict(bundle::IdentityStateBundle)::Dict{String,Any}
+function bundle_to_dict(bundle::IdentityBundle)::Dict{String,Any}
     Dict{String,Any}(
         "version" => bundle.version,
         "created_at" => bundle.created_at,
@@ -108,8 +108,8 @@ function bundle_to_dict(bundle::IdentityStateBundle)::Dict{String,Any}
     )
 end
 
-function dict_to_bundle(d::Dict{String,Any})::IdentityStateBundle
-    IdentityStateBundle(
+function dict_to_bundle(d::Dict{String,Any})::IdentityBundle
+    IdentityBundle(
         get(d, "version", "unknown"),
         get(d, "created_at", ""),
         get(d, "identity", ""),
@@ -146,7 +146,7 @@ get_mem_val(d::Dict, k::String, default::Int64) = begin
 end
 
 function apply_bundle(
-    bundle::IdentityStateBundle,
+    bundle::IdentityBundle,
     self_model::SelfModelType,
     internal::InternalEmotionalType
 )::Tuple{SelfModelType,InternalEmotionalType}
@@ -176,13 +176,13 @@ function apply_bundle(
 end
 
 function merge_bundle(
-    existing::IdentityStateBundle,
-    incoming::IdentityStateBundle
-)::IdentityStateBundle
+    existing::IdentityBundle,
+    incoming::IdentityBundle
+)::IdentityBundle
     merged_capabilities = unique(vcat(existing.capabilities, incoming.capabilities))
     merged_limitations = unique(vcat(existing.limitations, incoming.limitations))
 
-    IdentityStateBundle(
+    IdentityBundle(
         CURRENT_BUNDLE_VERSION,
         string(now()),
         existing.identity,
@@ -203,7 +203,7 @@ function merge_bundle(
     )
 end
 
-function get_identity_fingerprint(bundle::IdentityStateBundle)::String
+function get_identity_fingerprint(bundle::IdentityBundle)::String
     data = bundle.identity * bundle.current_state * join(bundle.capabilities, ",")
     hash_string(data)
 end
