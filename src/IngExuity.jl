@@ -65,13 +65,17 @@ function chat_template(input::String; session_id::Int64=0)::String
     creative = CreativeIngenuity.generate(research, internal_emotional)
     precognition = Precognition.predict_trajectory(user_model, internal_emotional)
 
-    predictions = Predictions.predict(
+    predictions = Predictions.predict_with_retry(
         user_model, internal_emotional, precognition,
         GLOBAL_STATE.prediction_state.sandbox_results
     )
 
-    sandbox_results = SandboxSim.simulate_batch(predictions, user_model, self_model)
+    sandbox_results = SandboxSim.validate_batch(predictions, user_model, internal_emotional)
     surviving_predictions = SandboxSim.filter_surviving(predictions, sandbox_results)
+
+    GLOBAL_STATE.prediction_state.current_predictions = surviving_predictions
+    GLOBAL_STATE.prediction_state.sandbox_results = sandbox_results
+
     action = Action.execute(decision, creative, surviving_predictions)
     reaction = ReactionObservance.observe(human_input, action)
     tone = Voice.determine_tone(internal_emotional, user_model, reaction)  # Symbol now
