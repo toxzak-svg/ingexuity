@@ -1,10 +1,7 @@
 #!/bin/bash
 set -e
 
-# Install Python dependencies
-if [ -f /app/python/requirements.txt ]; then
-    pip install --no-cache-dir -r /app/python/requirements.txt
-fi
+# Python dependencies are installed during Docker build (see Dockerfile)
 
 # Start Python Gemma service in background
 if [ -f /app/python/gemma_e2b_service.py ]; then
