@@ -1,21 +1,29 @@
 FROM julia:1.10
 
-WORKDIR /root
+WORKDIR /app
 
 ENV PORT=8000
+ENV PYTHONUNBUFFERED=1
 
-# Copy Project.toml
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3-pip \
+    curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python
+
 COPY Project.toml .
-
-# Install Julia dependencies (force redownload to break stale cache)
-RUN julia --project=. -e 'using Pkg; Pkg.instantiate(); using HTTP, Flux; @info "Deps ready"'
-
-# Copy source
 COPY src/ src/
+COPY python/ python/
 
-# Precompile the package
+RUN pip install --no-cache-dir -r python/requirements.txt
+
+RUN julia --project=. -e 'using Pkg; Pkg.instantiate()'
 RUN julia --project=. -e 'using IngExuity'
+
+COPY start.sh .
+RUN chmod +x start.sh
 
 EXPOSE 8000
 
-CMD ["julia", "--project=.", "-e", "using IngExuity; IngExuity.start()"]
+CMD ["./start.sh"]

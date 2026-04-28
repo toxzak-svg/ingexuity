@@ -1,0 +1,10 @@
+# Python dependencies for Gemma 4 E2B service
+# Install with: pip install -r python/requirements.txt
+
+transformers>=4.50.0
+torch>=2.0.0
+accelerate>=0.20.0
+numpy>=1.24.0
+
+# Optional: For speech generation
+# TTS>=0.15.0

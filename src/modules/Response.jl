@@ -69,6 +69,7 @@ const RESPONSE_TEMPLATES = Dict(
         "What would help most right now?",
         "Let's break it down.",
         "Where do you want to start?",
+        "What's the core of the problem?",
     ],
     (:help_seeking, :direct, true) => [
         "Let's figure this out together.",
@@ -83,6 +84,11 @@ const RESPONSE_TEMPLATES = Dict(
     ],
 
     # Creative
+    (:creative, :direct, false) => [
+        "Tell me more about the idea.",
+        "What's the core of it?",
+        "What would success look like?",
+    ],
     (:creative, :curious, false) => [
         "What inspired that?",
         "I like that direction.",

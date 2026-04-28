@@ -6,11 +6,12 @@ module Research
 export investigate
 
 function investigate(human_input, comprehension; curiosity=nothing)
+    sentiment = haskey(comprehension, :sentiment) ? comprehension[:sentiment] : 0.0
     Dict(
         :query => human_input.raw,
         :topic => comprehension[:topic],
-        :sentiment => comprehension[:sentiment],
-        :depth => "surface"  # v1: no real research yet
+        :sentiment => sentiment,
+        :depth => "surface"
     )
 end
 

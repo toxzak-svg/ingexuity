@@ -6,7 +6,7 @@ module IngExuity
 
 using HTTP, Dates, Base.Iterators
 
-# Module structure — 16 modules + Memory matching IngEnuity architecture v1.3
+# Module structure — 20 modules + Memory matching IngEnuity architecture v1.4
 include("modules/Types.jl")
 include("modules/HumanInput.jl")
 include("modules/ResultsAnalysis.jl")
@@ -29,6 +29,11 @@ include("modules/Voice.jl")
 include("modules/Output.jl")
 include("modules/Understanding.jl")
 include("modules/Intelligence.jl")
+include("modules/IdentityStateBundle.jl")
+include("modules/ExecutionStateEntropy.jl")
+include("modules/InstanceCommunication.jl")
+include("modules/MobileWASM.jl")
+include("modules/GemmaProvider.jl")
 
 # ============================================================================
 # Conversation loop — the core IngEnuity experience
@@ -36,7 +41,7 @@ include("modules/Intelligence.jl")
 
 const GLOBAL_STATE = Types.ConversationState(0)
 
-function chat(input::String; session_id::Int64=0)::String
+function chat_template(input::String; session_id::Int64=0)::String
     human_input = HumanInput.process(input; session_id=session_id)
     results = ResultsAnalysis.process(human_input, GLOBAL_STATE)
     comprehension = Comprehension.comprehend(human_input)
@@ -76,8 +81,9 @@ function chat(input::String; session_id::Int64=0)::String
     understanding = Understanding.interpret(human_input, response, surviving_predictions, reaction)
 
     Memory.store("User said: $(human_input.raw)", source=:conversation)
-    if !isempty(comprehension[:topic]) && comprehension[:topic] != "general"
-        Memory.store("Topic: $(comprehension[:topic])", source=:topic_detection)
+    topic = comprehension[:topic]
+    if !isempty(string(topic)) && topic != :general
+        Memory.store("Topic: $(string(topic))", source=:topic_detection)
     end
 
     for pred in surviving_predictions
@@ -107,6 +113,141 @@ function build_stay_present_response(internal::Types.InternalEmotional, user_mod
         "That sounds meaningful. I'm here — go on."
     end
 end
+
+# ============================================================================
+# Gemma 4 E2B chat — neural generation instead of templates
+# ============================================================================
+
+const GEMMA_LLM = GemmaProvider.GemmaLLM()
+
+function chat_gemma(input::String; session_id::Int64=0)::Dict{String,Any}
+    human_input = HumanInput.process(input; session_id=session_id)
+    comprehension = Comprehension.comprehend(human_input)
+
+    user_model = GLOBAL_STATE.user_model
+    internal_emotional = GLOBAL_STATE.internal_emotional
+
+    # Update user model with new input
+    user_model = UserModel.update(user_model, human_input, comprehension)
+    internal_emotional = InternalEmotional.update(internal_emotional, human_input, comprehension)
+
+    # Build system prompt from user model and internal state
+    system_prompt = build_gemma_system_prompt(user_model, internal_emotional)
+
+    # Check if we should stay present (empathy first)
+    if InternalEmotional.should_stay_present(internal_emotional)
+        stay_messages = [
+            Dict("role" => "system", "content" => system_prompt),
+            Dict("role" => "user", "content" => input),
+            Dict("role" => "assistant", "content" => "That sounds really hard. I'm here — take your time.")
+        ]
+
+        response = GemmaProvider.generate(GEMMA_LLM, stay_messages)
+        response["stay_present"] = true
+
+        # Update state
+        new_state, updated_model = InternalEmotional.advance_stay(internal_emotional, user_model)
+        GLOBAL_STATE.internal_emotional = new_state
+        GLOBAL_STATE.user_model = updated_model
+
+        return response
+    end
+
+    # Build conversation history
+    history = build_conversation_history()
+
+    # Add recent context about user state
+    context_addition = ""
+    if !isempty(user_model.topics)
+        context_addition *= "\nUser is currently talking about: $(last(user_model.topics))"
+    end
+    if UserModel.is_stressed(user_model)
+        context_addition *= "\nUser seems stressed — be supportive."
+    end
+
+    full_input = input * context_addition
+
+    # Generate with Gemma
+    response = GemmaProvider.chat(GEMMA_LLM, history, full_input;
+                                  system_prompt=system_prompt,
+                                  thinking=false)
+
+    # Store in memory
+    Memory.store("User said: $input", source=:conversation)
+    topic = comprehension[:topic]
+    if topic != :general
+        Memory.store("Topic: $(string(topic))", source=:topic_detection)
+        Precognition.update_trajectories!(user_model, internal_emotional, "topic_mentioned", Dict("topic" => string(topic)))
+    end
+
+    # Execute any actions Gemma requested
+    if haskey(response, "actions") && !isempty(response["actions"])
+        action_results = GemmaProvider.execute_actions(response["actions"])
+        response["action_results"] = action_results
+    end
+
+    # Update global state
+    GLOBAL_STATE.turn_count += 1
+    GLOBAL_STATE.user_model = user_model
+    GLOBAL_STATE.internal_emotional = internal_emotional
+    push!(GLOBAL_STATE.active_context, human_input)
+
+    response
+end
+
+function build_gemma_system_prompt(user_model::Types.UserModel,
+                                   internal::Types.InternalEmotional)::String
+    base = """
+You are IngExuity, an AI companion that is part of your life.
+
+You have access to:
+- Memory: You can remember things about the user
+- Predictions: You understand patterns in user behavior
+- Voice: You can speak naturally
+
+Be warm, present, and genuinely helpful. When the user is stressed or upset, prioritize empathy over solutions.
+
+Your personality:
+- Direct when needed, gentle when appropriate
+- Curious about the user
+- Honest about what you know and don't know
+- You don't use overly formal language
+
+Always respond as if you are having a real conversation, not giving a presentation.
+"""
+
+    # Add user-specific context
+    if !isempty(user_model.topics)
+        recent = join(user_model.topics[max(1, end-3):end], ", ")
+        base *= "\n\nRecent topics: $recent"
+    end
+
+    stress_triggers = get(user_model.emotional_patterns, "stress_triggers", String[])
+    if !isempty(stress_triggers)
+        base *= "\n\nThis user's stress triggers: $(join(stress_triggers, ", "))"
+    end
+
+    base
+end
+
+function build_conversation_history()::Vector{Dict{String,Any}}
+    history = Dict{String,Any}[]
+    for h in GLOBAL_STATE.active_context[max(1, end-5):end]
+        push!(history, Dict(
+            "role" => "user",
+            "content" => h.raw
+        ))
+    end
+    history
+end
+
+function chat_gemma_simple(input::String)::String
+    response = chat_gemma(input)
+    get(response, "text", get(response, "error", "No response"))
+end
+
+# Legacy alias
+chat(input::String; session_id::Int64=0) = chat_gemma(input; session_id=session_id)
 
 function predict_user()::Vector{Dict}
     [Dict("action" => p.predicted_action, "need" => p.predicted_need,
@@ -167,8 +308,9 @@ function handle_request(req::HTTP.Request)::HTTP.Response
         m = match(r"\"message\"\s*:\s*\"([^\"]+)\"", body)
         input = m !== nothing ? m[1] : ""
         isempty(input) && return HTTP.Response(200, ["Content-Type" => "application/json"], body=to_json(Dict("error" => "no message")))
-        response = chat(input)
-        return HTTP.Response(200, ["Content-Type" => "application/json"], body=to_json(Dict("response" => response)))
+        response = chat_gemma(input)
+        # Return full response including actions, audio, etc
+        return HTTP.Response(200, ["Content-Type" => "application/json"], body=to_json(response))
     elseif target == "/api/predict"
         return HTTP.Response(200, ["Content-Type" => "application/json"], body=to_json(Dict("predictions" => predict_user())))
     elseif target == "/api/intelligence"
@@ -177,6 +319,19 @@ function handle_request(req::HTTP.Request)::HTTP.Response
         return HTTP.Response(200, ["Content-Type" => "application/json"], body=to_json(get_user_model()))
     elseif target == "/api/memory"
         return HTTP.Response(200, ["Content-Type" => "application/json"], body=to_json(get_memory_summary()))
+    elseif target == "/api/gemma/status" && HTTP.method(req) == "GET"
+        status = GemmaProvider.is_loaded(GEMMA_LLM) ? "loaded" : "not loaded"
+        caps = GemmaProvider.get_capabilities(GEMMA_LLM)
+        return HTTP.Response(200, ["Content-Type" => "application/json"],
+            body=to_json(Dict("status" => status, "capabilities" => caps)))
+    elseif target == "/api/gemma/load" && HTTP.method(req) == "POST"
+        ok = GemmaProvider.load_model(GEMMA_LLM)
+        return HTTP.Response(200, ["Content-Type" => "application/json"],
+            body=to_json(Dict("loaded" => ok)))
+    elseif target == "/api/gemma/unload" && HTTP.method(req) == "POST"
+        ok = GemmaProvider.unload_model(GEMMA_LLM)
+        return HTTP.Response(200, ["Content-Type" => "application/json"],
+            body=to_json(Dict("unloaded" => ok)))
     elseif target == "/"
         return HTTP.Response(200, ["Content-Type" => "text/html"], body=HTML_UI)
     else
@@ -200,6 +355,8 @@ h1 { color: #7aff7a; font-size: 1.5em; }
 input { width: 100%; padding: 12px; border-radius: 8px; border: 1px solid #333; background: #111; color: #fff; box-sizing: border-box; }
 button { padding: 12px 24px; background: #7aff7a; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; }
 #stats { font-size: 0.85em; color: #888; margin-top: 20px; }
+#status { font-size: 0.75em; color: #666; margin-top: 10px; }
+.error { color: #ff6b6b; }
 </style>
 </head>
 <body>
@@ -208,6 +365,7 @@ button { padding: 12px 24px; background: #7aff7a; border: none; border-radius: 8
 <input id="input" placeholder="Say something..." onkeydown="if(event.keyCode===13)send()">
 <button onclick="send()" style="margin-top:10px">Send</button>
 <div id="stats"></div>
+<div id="status"></div>
 <script>
 async function send() {
   const inp = document.getElementById('input'), chat = document.getElementById('chat');
@@ -216,16 +374,30 @@ async function send() {
   const res = await fetch('/api/chat', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({message: text})});
   const data = await res.json();
   chat.innerHTML += '<div class="msg user">' + text + '</div>';
-  chat.innerHTML += '<div class="msg ai">' + data.response + '</div>';
+  if (data.error) {
+    chat.innerHTML += '<div class="msg ai error">Error: ' + data.error + '</div>';
+  } else {
+    chat.innerHTML += '<div class="msg ai">' + (data.text || data.response || 'No response') + '</div>';
+    if (data.actions && data.actions.length > 0) {
+      console.log('Actions:', data.actions);
+    }
+  }
   chat.scrollTop = chat.scrollHeight;
   updateStats();
+  updateGemmaStatus();
 }
 async function updateStats() {
   const r = await fetch('/api/intelligence');
   const d = await r.json();
   document.getElementById('stats').innerText = 'Intelligence: ' + d.correct + '/' + d.total + ' predictions';
 }
+async function updateGemmaStatus() {
+  const r = await fetch('/api/gemma/status');
+  const d = await r.json();
+  document.getElementById('status').innerText = 'Gemma: ' + d.status + (d.capabilities && d.capabilities.features ? ' | ' + d.capabilities.features.join(', ') : '');
+}
 updateStats();
+updateGemmaStatus();
 </script>
 </body>
 </html>

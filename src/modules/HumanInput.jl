@@ -3,12 +3,13 @@
 # ============================================================================
 module HumanInput
 
+using Dates
+using ..Types: HumanInput as HumanInputType
+
 export process
 
-"""Process raw user input into a HumanInput struct"""
 function process(raw::String; session_id::Int64=0)
-    # Keep it simple — no complex parsing needed for v1
-    HumanInput(raw, now(), session_id)
+    HumanInputType(raw, Dates.now(), session_id)
 end
 
 end # module

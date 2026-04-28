@@ -11,10 +11,10 @@ function update(user_model::UserModelType, human_input, comprehension)::UserMode
     raw = human_input.raw
     words = split(lowercase(raw))
 
-    # Track topics
     topic = comprehension[:topic]
-    if topic != "general" && topic ∉ user_model.topics
-        push!(user_model.topics, topic)
+    topic_str = string(topic)
+    if topic != :general && !(topic_str in user_model.topics)
+        push!(user_model.topics, topic_str)
     end
 
     # Track emotional patterns
