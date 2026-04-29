@@ -147,11 +147,7 @@ def load_base_model(config: TrainingConfig):
 
 def setup_lora(model, config: TrainingConfig):
     """Setup LoRA adapters"""
-    from peft import LoraConfig, get_peft_model, prepare_model_for_kv_cache_setting
-    
-    # Prepare model for kvcache if needed
-    if hasattr(model, 'prepare_model_for_kv_cache_setting'):
-        model = prepare_model_for_kv_cache_setting(model)
+    from peft import LoraConfig, get_peft_model
     
     lora_config = LoraConfig(
         r=config.lora_rank,
