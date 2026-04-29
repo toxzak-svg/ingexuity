@@ -35,6 +35,7 @@ include("modules/InstanceCommunication.jl")
 include("modules/MobileWASM.jl")
 include("modules/GemmaProvider.jl")
 include("modules/LlamaInference.jl")
+include("modules/IGSDCore.jl")
 
 # ============================================================================
 # Conversation loop — the core IngEnuity experience
@@ -283,7 +284,14 @@ function chat_gemma_simple(input::String)::String
     get(response, "text", get(response, "error", "No response"))
 end
 
-chat(input::String; session_id::Int64=0) = LlamaInference.chat(input; session_id=session_id)
+function chat(input::String; session_id::Int64=0)::Dict{String,Any}
+    try
+        text = IGSDCore.chat(input)
+        return Dict("text" => text, "model" => "IGSDCore-32M (INT8)", "session_id" => session_id)
+    catch e
+        return LlamaInference.chat(input; session_id=session_id)
+    end
+end
 
 function predict_user()::Vector{Dict}
     [Dict("action" => p.predicted_action, "need" => p.predicted_need,

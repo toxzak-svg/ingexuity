@@ -1,84 +1,103 @@
-# Gemma 4 E2B Service
+# Python Scripts for IngExuity
 
-HTTP service wrapping Google's Gemma 4 E2B model for IngExuity.
+This directory contains Python scripts for model training and inference.
+
+## Scripts
+
+| Script | Purpose |
+|--------|---------|
+| [`gemma_e2b_service.py`](gemma_e2b_service.py) | HTTP service for Gemma 4 E2B with function calling |
+| [`train_tinyllama.py`](train_tinyllama.py) | LoRA fine-tuning for TinyLlama 1.1B |
+| [`kaggle_train.py`](kaggle_train.py) | Kaggle-specific training runner (P100 GPU) |
+| [`paperspace_train.py`](paperspace_train.py) | Paperspace-specific training runner (M4000/RTX4000) |
+| [`lora_config.yaml`](lora_config.yaml) | LoRA hyperparameters configuration |
+
+## Installation
+
+```bash
+pip install -r requirements.txt
+```
 
 ## Quick Start
 
-```bash
-# Install dependencies
-pip install -r requirements.txt
+### 1. Fine-tune TinyLlama on Kaggle
 
-# Run service (will download model on first run)
-python gemma_e2b_service.py --auto-load
+1. Create a Kaggle account and enable GPU (P100) in Notebook settings
+2. Upload your training data as a Kaggle dataset (JSONL format)
+3. Upload `train_tinyllama.py` and `requirements.txt`
+4. Run:
+   ```python
+   from kaggle_train import main
+   main()
+   ```
 
-# Or run without auto-loading, load via HTTP
-python gemma_e2b_service.py
-curl -X POST http://localhost:8765/load
+### 2. Fine-tune TinyLlama on Paperspace
+
+1. Create a Paperspace account with free GPU tier
+2. Upload training data and scripts to your workspace
+3. Run:
+   ```bash
+   python paperspace_train.py
+   ```
+
+### 3. Use Fine-tuned Model in Julia
+
+```julia
+using IngExuity
+using LlamaInference
+
+# Load the base model
+load_llama_model()
+
+# Or load your custom fine-tuned model
+load_finetuned_model("/path/to/your/finetuned/model.gguf")
+
+# Generate text
+result = chat_llama("Hello, how are you?")
+println(result["text"])
 ```
 
-## API Endpoints
+## Training Data Format
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/health` | Health check |
-| GET | `/capabilities` | Model capabilities |
-| POST | `/generate` | Text generation |
-| POST | `/generate_audio` | Audio input + speech output |
-| POST | `/load` | Load model |
-| POST | `/unload` | Unload model |
+Training data should be in JSONL format:
 
-## Examples
-
-### Text Generation
-
-```bash
-curl -X POST http://localhost:8765/generate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "messages": [
-      {"role": "system", "content": "You are IngExuity."},
-      {"role": "user", "content": "Hello!"}
-    ],
-    "max_tokens": 256
-  }'
+```jsonl
+{"text": "Your training example here"}
+{"text": "Another example"}
 ```
 
-### Audio Input
-
-```bash
-curl -X POST http://localhost:8765/generate_audio \
-  -H "Content-Type: application/json" \
-  -d '{
-    "audio": "<base64 audio>",
-    "messages": [],
-    "max_tokens": 256
-  }'
-```
-
-### Function Calling
-
-The model can call functions. Response includes:
+Or JSON format:
 
 ```json
 {
-  "text": "Let me check that for you.",
-  "actions": [
-    {
-      "function": "check_memory",
-      "parameters": {"query": "user preferences"}
-    }
+  "data": [
+    "First example",
+    "Second example"
   ]
 }
 ```
 
-## Running from Julia
+## LoRA Configuration
 
-```julia
-using IngExuity.GemmaProvider
+Default settings optimized for 16GB GPU (Kaggle P100):
+- LoRA rank: 32
+- Batch size: 4
+- Learning rate: 2e-4
+- Epochs: 3
+- Max sequence length: 512
 
-llm = GemmaLLM(port=8765)
-load_model(llm)
+For 8GB GPU (Paperspace M4000), reduce batch size to 2 and increase gradient accumulation to 16.
 
-response = generate(llm, "You are IngExuity.", "Hello!")
-println(response["text"])
-```
+## Output
+
+Fine-tuned models are saved to:
+- `./tinyllama_finetuned/final/` (local)
+- `/kaggle/working/tinyllama_finetuned/final/` (Kaggle)
+- `/storage/tinyllama_finetuned/final/` (Paperspace)
+
+## Notes
+
+- TinyLlama is ~1.1B parameters, quantized Q4_K_M is ~634MB
+- LoRA training only updates ~0.5-2% of parameters
+- Training with QLoRA (4-bit) requires ~6GB VRAM
+- Full fine-tuning is possible with ~16GB VRAM
