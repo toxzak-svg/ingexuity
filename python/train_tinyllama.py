@@ -188,10 +188,12 @@ def load_dataset(path: str, tokenizer, config: TrainingConfig):
                 item = json.loads(line)
                 texts.append(item.get('text', item.get('content', '')))
     elif data_path.suffix == '.json':
-        # JSON format: {"data": ["text1", "text2", ...]}
         with open(data_path, 'r') as f:
             data = json.load(f)
-            texts = data.get('data', data.get('texts', []))
+            if isinstance(data, list):
+                texts = [item.get('text', item.get('content', '')) for item in data]
+            else:
+                texts = data.get('data', data.get('texts', []))
     elif data_path.is_dir():
         # Directory - look for train.* files
         train_files = list(data_path.glob("train.*"))
