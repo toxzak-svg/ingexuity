@@ -173,8 +173,6 @@ def setup_lora(model, config: TrainingConfig):
 
 def load_dataset(path: str, tokenizer, config: TrainingConfig):
     """Load and format training dataset"""
-    from transformers import DataCollatorForLanguageModeling
-    
     print(f"[Train] Loading dataset from: {path}")
     
     # Try multiple formats
@@ -275,7 +273,7 @@ def train(
 ):
     """Main training loop"""
     from torch.utils.data import Dataset, DataLoader
-    from transformers import Trainer, TrainingArguments
+    from transformers import Trainer, TrainingArguments, DataCollatorForLanguageModeling
     
     # Create dataset
     class TextDataset(Dataset):
