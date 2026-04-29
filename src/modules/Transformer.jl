@@ -1,14 +1,14 @@
 # ============================================================================
-# NanoGPT.jl — Pure Julia NanoGPT for IngExuity
-# Drop-in replacement for Flux-based NanoGPT
+# Transformer.jl — Pure Julia Transformer for IngExuity
+# Inference-only implementation (no training dependencies)
+# Based on GPT-2 architecture
 # ============================================================================
-module NanoGPT
+module Transformer
 
 using Random
 using Statistics
-import StatsBase
 
-export TransformerModel, TransformerConfig, SimpleTokenizer, generate, chat_local
+export TransformerModel, TransformerConfig, generate_text
 
 # ============================================================================
 # Configuration
@@ -29,13 +29,13 @@ function param_count(cfg::TransformerConfig)::Int
     vocab = cfg.vocab_size * cfg.n_embed
     pos = cfg.max_seq_len * cfg.n_embed
     attn = cfg.n_layers * (
-        3 * cfg.n_embed * cfg.n_embed +
-        cfg.n_embed * cfg.n_embed +
-        2 * cfg.n_embed
+        3 * cfg.n_embed * cfg.n_embed +  # Wq, Wk, Wv
+        cfg.n_embed * cfg.n_embed +        # Wo
+        2 * cfg.n_embed                    # layer norms
     )
     ffn = cfg.n_layers * (
-        2 * cfg.n_embed * cfg.n_hidden +
-        2 * cfg.n_embed
+        2 * cfg.n_embed * cfg.n_hidden +   # W1, W2
+        2 * cfg.n_embed                    # layer norms
     )
     head = cfg.vocab_size * cfg.n_embed
     total = vocab + pos + attn + ffn + head + 2 * cfg.n_embed
@@ -90,10 +90,11 @@ function LayerNorm(n::Int; bias::Bool=true, eps::Float32=1f-5)
 end
 
 function (ln::LayerNorm)(x::AbstractMatrix{Float32})::AbstractMatrix{Float32}
-    m = Statistics.mean(x, dims=2)
-    v = Statistics.var(x, dims=2, corrected=true)
-    x_norm = (x .- m) ./ sqrt.(v .+ ln.eps)
-    return ln.weight .* x_norm .+ ln.bias
+    # x: (n_embed, seq_len)
+    mean = dropdims(mean(x, dims=1), dims=1)
+    var = dropdims(var(x, dims=1, corrected=true), dims=1)
+    x_norm = @. (x - mean) / sqrt(var + ln.eps)
+    return @. ln.weight * x_norm + ln.bias
 end
 
 # ============================================================================
@@ -125,11 +126,12 @@ function CausalAttention(n_embed::Int, n_heads::Int)
 end
 
 function (attn::CausalAttention)(x::AbstractMatrix{Float32})::AbstractMatrix{Float32}
+    # x: (n_embed, seq_len)
     n_embed, T = size(x)
     n_heads = attn.n_heads
     head_dim = attn.head_dim
 
-    Q = attn.Wq' * x
+    Q = attn.Wq' * x  # (n_embed, seq_len)
     K = attn.Wk' * x
     V = attn.Wv' * x
 
@@ -142,7 +144,7 @@ function (attn::CausalAttention)(x::AbstractMatrix{Float32})::AbstractMatrix{Flo
         for i in 1:T
             for j in 1:T
                 if j <= i
-                    attn_scores[i, j, h] = attn.scale * sum(Q_seq[h, :, i] .* K_seq[h, :, j])
+                    attn_scores[i, j, h] = attn.scale * dot(Q_seq[h, :, i], K_seq[h, :, j])
                 end
             end
         end
@@ -249,7 +251,7 @@ function TransformerModel(config::TransformerConfig)
     blocks = [TransformerBlock(n, config.n_heads, config.n_hidden) for _ in 1:config.n_layers]
     final_ln = LayerNorm(n)
 
-    lm_head = token_embedding
+    lm_head = permutedims(token_embedding, [2, 1])
 
     return TransformerModel(
         config,
@@ -265,7 +267,7 @@ function (model::TransformerModel)(tokens::AbstractMatrix{Int})::AbstractMatrix{
     cfg = model.config
     T = size(tokens, 1)
 
-    x = model.token_embedding[tokens .+ 1, :]'
+    x = model.token_embedding[tokens .+ 1, :]'  # (n_embed, T)
     x = x .+ model.position_embedding[1:T, :]'
 
     for block in model.blocks
@@ -279,18 +281,7 @@ function (model::TransformerModel)(tokens::AbstractMatrix{Int})::AbstractMatrix{
 end
 
 function (model::TransformerModel)(tokens::AbstractVector{Int})::AbstractVector{Float32}
-    T = length(tokens)
-    x = model.token_embedding[tokens .+ 1, :]'
-    x = x .+ model.position_embedding[1:T, :]'
-
-    for block in model.blocks
-        x = block(x)
-    end
-
-    x = model.final_ln(x)
-    logits = model.lm_head * x
-
-    return logits[:, 1]
+    return model(reshape(tokens, length(tokens), 1))[:, 1]
 end
 
 function generate(model::TransformerModel, tokenizer, seed::String;
@@ -302,22 +293,18 @@ function generate(model::TransformerModel, tokenizer, seed::String;
 
     while length(tokens) < max_len
         context = tokens[max(1, end-model.config.max_seq_len+1):end]
-        logits = model(context) ./ temperature
+        logits = model(context)
+        logits = logits[end] ./ temperature
 
-        if top_k > 0 && top_k < length(logits)
-            sorted_idx = sortperm(logits, rev=true)
-            keep_idx = sorted_idx[1:top_k]
-            filtered_logits = Float32[-Inf for _ in 1:length(logits)]
-            for i in keep_idx
-                filtered_logits[i] = logits[i]
-            end
-            logits = filtered_logits
+        if top_k > 0
+            top_idx = partialsortperm(logits, 1:top_k, rev=true)
+            mask = trues(length(logits))
+            mask[top_idx] .= false
+            logits[mask] .= -Inf
         end
 
         probs = softmax(logits)
-        probs = max.(probs, Float32(1e-10))
-        probs = probs ./ sum(probs)
-        next_token = StatsBase.sample(rng, 1:length(probs), StatsBase.Weights(probs))
+        next_token = sample(rng, 1:length(probs), StatsBase.Weights(probs))
 
         push!(tokens, next_token)
 
@@ -333,186 +320,7 @@ function Base.show(io::IO, m::TransformerModel)
     cfg = m.config
     params = param_count(cfg)
     println(io, "TransformerModel($(cfg.n_layers) layers, $(cfg.n_heads) heads, $(cfg.n_embed) embed)")
-    println(io, "  → ~$(round(params/1e6, digits=1))M params, $(cfg.vocab_size) vocab, $(cfg.max_seq_len) ctx)")
-end
-
-# ============================================================================
-# Simple BPE Tokenizer
-# ============================================================================
-
-struct SimpleTokenizer
-    vocab::Dict{Vector{Int}, Int}
-    reverse_vocab::Vector{Vector{Int}}
-    eot_token::Int
-    eot_byte::Vector{Int}
-end
-
-function SimpleTokenizer(vocab_size::Int=5000; rng=Random.Xoshiro(42))
-    @assert vocab_size >= 256
-
-    vocab = Dict{Vector{Int}, Int}()
-    reverse_vocab = Vector{Vector{Int}}()
-
-    for i in 0:255
-        vocab[[i]] = i + 1
-        push!(reverse_vocab, [i])
-    end
-
-    eot_token = vocab_size - 1
-    push!(reverse_vocab, [256])
-    vocab[[256]] = eot_token
-
-    return SimpleTokenizer(vocab, reverse_vocab, eot_token, [256])
-end
-
-function _get_stats(freqs::Vector{Dict{Vector{Int}, Int}})
-    pairs = Dict{Vector{Int}, Int}()
-    for freqs_dict in freqs
-        for (pair, count) in freqs_dict
-            pairs[pair] = get(pairs, pair, 0) + count
-        end
-    end
-    return pairs
-end
-
-function _merge_pair!(freqs::Vector{Dict{Vector{Int}, Int}}, pair::Vector{Int}, new_id::Int)
-    for freqs_dict in freqs
-        new_freqs = Dict{Vector{Int}, Int}()
-        for (tokens, count) in freqs_dict
-            new_tokens = Int[]
-            i = 1
-            while i <= length(tokens)
-                if i < length(tokens) && tokens[i] == pair[1] && tokens[i+1] == pair[2]
-                    push!(new_tokens, new_id)
-                    i += 2
-                else
-                    push!(new_tokens, tokens[i])
-                    i += 1
-                end
-            end
-            new_freqs[new_tokens] = count
-        end
-        empty!(freqs_dict)
-        for (k, v) in new_freqs
-            freqs_dict[k] = v
-        end
-    end
-end
-
-function train(texts::Vector{String}, vocab_size::Int=5000; rng=Random.Xoshiro(42))
-    tokenizer = SimpleTokenizer(vocab_size, rng=rng)
-
-    freqs = [Dict{Vector{Int}, Int}() for _ in 1:length(texts)]
-
-    for (i, text) in enumerate(texts)
-        tokens = vcat([[Int(c) for c in text]..., [256]])
-        freqs[i][tokens] = 1
-    end
-
-    current_id = 257
-    target_size = vocab_size - 1
-
-    while current_id <= target_size
-        pairs = _get_stats(freqs)
-        if isempty(pairs)
-            break
-        end
-
-        best_pair = argmax(pairs)
-        if pairs[best_pair] < 2
-            break
-        end
-
-        push!(tokenizer.reverse_vocab, best_pair)
-        tokenizer.vocab[best_pair] = current_id
-
-        _merge_pair!(freqs, best_pair, current_id)
-        current_id += 1
-    end
-
-    return tokenizer
-end
-
-function encode(tok::SimpleTokenizer, text::String)::Vector{Int}
-    tokens = [Int(c) for c in text]
-    result = Int[]
-
-    i = 1
-    while i <= length(tokens)
-        longest = [tokens[i]]
-        for j in (i+1):length(tokens)
-            prefix = tokens[i:j]
-            if haskey(tok.vocab, prefix)
-                longest = prefix
-            else
-                break
-            end
-        end
-        push!(result, tok.vocab[longest])
-        i += length(longest)
-    end
-
-    return result
-end
-
-function decode(tok::SimpleTokenizer, tokens::Vector{Int})::String
-    bytes = Vector{Int}()
-
-    for token in tokens
-        if token == tok.eot_token
-            break
-        end
-        if token > 0 && token <= length(tok.reverse_vocab)
-            append!(bytes, tok.reverse_vocab[token])
-        end
-    end
-
-    bytes = bytes[bytes .!= 256]
-    return String([Char(b) for b in bytes])
-end
-
-# ============================================================================
-# Model Loading & Chat
-# ============================================================================
-
-const MODEL = Ref{Union{TransformerModel, Nothing}}(nothing)
-const TOKENIZER = Ref{Union{SimpleTokenizer, Nothing}}(nothing)
-
-function load_model(config::TransformerConfig=TransformerConfig())
-    model = TransformerModel(config)
-    MODEL[] = model
-    return model
-end
-
-function load_tokenizer(vocab_size::Int=5000)
-    tokenizer = SimpleTokenizer(vocab_size)
-    TOKENIZER[] = tokenizer
-    return tokenizer
-end
-
-function is_loaded()::Bool
-    return MODEL[] !== nothing && TOKENIZER[] !== nothing
-end
-
-function chat_local(input::String; session_id::Int64=0)::Dict{String,Any}
-    if !is_loaded()
-        return Dict("error" => "Model not loaded. Call load_model() first.", "text" => "")
-    end
-
-    model = MODEL[]
-    tokenizer = TOKENIZER[]
-
-    response = generate(model, tokenizer, input; rng=Random.Xoshiro(time_ns() % Int64))
-
-    return Dict(
-        "text" => response,
-        "session_id" => session_id,
-        "model" => "NanoGPT (Pure Julia)"
-    )
-end
-
-function chat(input::String; session_id::Int64=0)::Dict{String,Any}
-    return chat_local(input; session_id=session_id)
+    println(io, "  → ~$(round(params/1e6, digits=1))M params, $(cfg.vocab_size) vocab, $(cfg.max_seq_len) ctx")
 end
 
 end # module
