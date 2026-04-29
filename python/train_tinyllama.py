@@ -30,8 +30,8 @@ class TrainingConfig:
     lora_target_modules: List[str] = None
     
     # Training
-    batch_size: int = 4
-    gradient_accumulation_steps: int = 8
+    batch_size: int = 8
+    gradient_accumulation_steps: int = 4
     learning_rate: float = 2e-4
     num_epochs: int = 3
     warmup_steps: int = 100

@@ -35,6 +35,7 @@ include("modules/InstanceCommunication.jl")
 include("modules/MobileWASM.jl")
 include("modules/GemmaProvider.jl")
 include("modules/LlamaInference.jl")
+include("modules/TrainedModel.jl")
 include("modules/IGSDCore.jl")
 
 # ============================================================================
@@ -130,6 +131,7 @@ end
 # ============================================================================
 
 const GEMMA_LLM = GemmaProvider.GemmaLLM()
+const TRAINED_LLM = TrainedModel.TrainedLLM()
 
 # ============================================================================
 # LOCAL INFERENCE — Pure Julia NanoGPT
@@ -286,6 +288,13 @@ end
 
 function chat(input::String; session_id::Int64=0)::Dict{String,Any}
     try
+        if TrainedModel.is_trained_loaded()
+            return TrainedModel.chat(input; session_id=session_id)
+        end
+    catch e
+        @debug "TrainedModel not available" exception=e
+    end
+    try
         text = IGSDCore.chat(input)
         return Dict("text" => text, "model" => "IGSDCore-32M (INT8)", "session_id" => session_id)
     catch e
@@ -376,7 +385,21 @@ response = chat(input)
                 body=to_json(Dict("error" => string(e))))
         end
 
-elseif target == "/api/gemma/load" && HTTP.method(req) == "POST"
+    elseif target == "/api/trained/load" && HTTP.method(req) == "POST"
+        try
+            model_path = TrainedModel.load_trained_model()
+            return HTTP.Response(200, ["Content-Type" => "application/json"],
+                body=to_json(Dict("loaded" => true, "model" => "TinyLlama-1.1B-LoRA")))
+        catch e
+            return HTTP.Response(500, ["Content-Type" => "application/json"],
+                body=to_json(Dict("error" => string(e))))
+        end
+
+    elseif target == "/api/trained/status" && HTTP.method(req) == "GET"
+        info = TrainedModel.get_model_info()
+        return HTTP.Response(200, ["Content-Type" => "application/json"], body=to_json(info))
+
+    elseif target == "/api/gemma/load" && HTTP.method(req) == "POST"
         ok = GemmaProvider.load_model(GEMMA_LLM)
         return HTTP.Response(200, ["Content-Type" => "application/json"],
             body=to_json(Dict("loaded" => ok)))
