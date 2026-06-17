@@ -8,6 +8,12 @@ using HTTP, Dates, Base.Iterators
 
 # Module structure — 20 modules + Memory matching IngEnuity architecture v1.4
 include("modules/Types.jl")
+
+# Main chat function (local inference + module pipeline)
+export chat, chat_template, predict_user, get_intelligence, get_user_model, get_memory_summary
+export load_local_model, load_local_tokenizer, is_local_loaded
+export is_live_data_query, fetch_live_data_for_message
+export start
 include("modules/HumanInput.jl")
 include("modules/ResultsAnalysis.jl")
 include("modules/Comprehension.jl")
@@ -29,13 +35,9 @@ include("modules/Voice.jl")
 include("modules/Output.jl")
 include("modules/Understanding.jl")
 include("modules/Intelligence.jl")
-include("modules/IdentityStateBundle.jl")
-include("modules/ExecutionStateEntropy.jl")
-include("modules/InstanceCommunication.jl")
-include("modules/MobileWASM.jl")
-include("modules/GemmaProvider.jl")
 include("modules/LlamaInference.jl")
 include("modules/TrainedModel.jl")
+include("modules/NanoGPT.jl")
 include("modules/IGSDCore.jl")
 
 # ============================================================================
@@ -64,6 +66,12 @@ function chat_template(input::String; session_id::Int64=0)::String
 
     curiosity = Curiosity.check(human_input, comprehension, user_model)
     research = Research.investigate(human_input, comprehension; curiosity=curiosity)
+
+    live_context = nothing
+    if get(research, :requires_live_data, false) && research[:live_data] !== nothing
+        live_context = research[:live_data]
+    end
+
     decision = Decision.decide(research)
     creative = CreativeIngenuity.generate(research, internal_emotional)
     precognition = Precognition.predict_trajectory(user_model, internal_emotional)
@@ -82,7 +90,7 @@ function chat_template(input::String; session_id::Int64=0)::String
     action = Action.execute(decision, creative, surviving_predictions)
     reaction = ReactionObservance.observe(human_input, action)
     tone = Voice.determine_tone(internal_emotional, user_model, reaction)  # Symbol now
-    response = Response.formulate(surviving_predictions, comprehension; tone=tone)  # Symbol
+    response = Response.formulate(surviving_predictions, comprehension; tone=tone, live_context=live_context)  # Symbol
     response = Response.adjust_tone(response, internal_emotional)
     output = Output.render(response, comprehension; voice_enabled=true)
     understanding = Understanding.interpret(human_input, response, surviving_predictions, reaction)
@@ -127,16 +135,11 @@ function build_stay_present_response(internal::Types.InternalEmotional, user_mod
 end
 
 # ============================================================================
-# Gemma 4 E2B chat — neural generation instead of templates
-# ============================================================================
-
-const GEMMA_LLM = GemmaProvider.GemmaLLM()
-const TRAINED_LLM = TrainedModel.TrainedLLM()
-
-# ============================================================================
 # LOCAL INFERENCE — Pure Julia NanoGPT
 # No external API. Runs fully offline on device.
 # ============================================================================
+
+const TRAINED_LLM = TrainedModel.TrainedLLM()
 
 function load_local_model()
     @info "Loading NanoGPT model..."
@@ -156,149 +159,115 @@ function is_local_loaded()::Bool
     NanoGPT.is_loaded()
 end
 
-# ============================================================================
-# Gemma chat (DEPRECATED — use chat_local for fully offline)
-# ============================================================================
-
-function chat_gemma(input::String; session_id::Int64=0)::Dict{String,Any}
-    human_input = HumanInput.process(input; session_id=session_id)
-    comprehension = Comprehension.comprehend(human_input)
-
-    user_model = GLOBAL_STATE.user_model
-    internal_emotional = GLOBAL_STATE.internal_emotional
-
-    # Update user model with new input
-    user_model = UserModel.update(user_model, human_input, comprehension)
-    internal_emotional = InternalEmotional.update(internal_emotional, human_input, comprehension)
-
-    # Build system prompt from user model and internal state
-    system_prompt = build_gemma_system_prompt(user_model, internal_emotional)
-
-    # Check if we should stay present (empathy first)
-    if InternalEmotional.should_stay_present(internal_emotional)
-        stay_messages = [
-            Dict("role" => "system", "content" => system_prompt),
-            Dict("role" => "user", "content" => input),
-            Dict("role" => "assistant", "content" => "That sounds really hard. I'm here — take your time.")
-        ]
-
-        response = GemmaProvider.generate(GEMMA_LLM, stay_messages)
-        response["stay_present"] = true
-
-        # Update state
-        new_state, updated_model = InternalEmotional.advance_stay(internal_emotional, user_model)
-        GLOBAL_STATE.internal_emotional = new_state
-        GLOBAL_STATE.user_model = updated_model
-
-        return response
-    end
-
-    # Build conversation history
-    history = build_conversation_history()
-
-    # Add recent context about user state
-    context_addition = ""
-    if !isempty(user_model.topics)
-        context_addition *= "\nUser is currently talking about: $(last(user_model.topics))"
-    end
-    if UserModel.is_stressed(user_model)
-        context_addition *= "\nUser seems stressed — be supportive."
-    end
-
-    full_input = input * context_addition
-
-    # Generate with Gemma
-    response = GemmaProvider.chat(GEMMA_LLM, history, full_input;
-                                  system_prompt=system_prompt,
-                                  thinking=false)
-
-    # Store in memory
-    Memory.store("User said: $input", source=:conversation)
-    topic = comprehension[:topic]
-    if topic != :general
-        Memory.store("Topic: $(string(topic))", source=:topic_detection)
-        Precognition.update_trajectories!(user_model, internal_emotional, "topic_mentioned", Dict("topic" => string(topic)))
-    end
-
-    # Execute any actions Gemma requested
-    if haskey(response, "actions") && !isempty(response["actions"])
-        action_results = GemmaProvider.execute_actions(response["actions"])
-        response["action_results"] = action_results
-    end
-
-    # Update global state
-    GLOBAL_STATE.turn_count += 1
-    GLOBAL_STATE.user_model = user_model
-    GLOBAL_STATE.internal_emotional = internal_emotional
-    push!(GLOBAL_STATE.active_context, human_input)
-
-    response
-end
-
-function build_gemma_system_prompt(user_model::Types.UserModel,
-                                   internal::Types.InternalEmotional)::String
-    base = """
-You are IngExuity, an AI companion that is part of your life.
-
-You have access to:
-- Memory: You can remember things about the user
-- Predictions: You understand patterns in user behavior
-- Voice: You can speak naturally
-
-Be warm, present, and genuinely helpful. When the user is stressed or upset, prioritize empathy over solutions.
-
-Your personality:
-- Direct when needed, gentle when appropriate
-- Curious about the user
-- Honest about what you know and don't know
-- You don't use overly formal language
-
-Always respond as if you are having a real conversation, not giving a presentation.
-"""
-
-    # Add user-specific context
-    if !isempty(user_model.topics)
-        recent = join(user_model.topics[max(1, end-3):end], ", ")
-        base *= "\n\nRecent topics: $recent"
-    end
-
-    stress_triggers = get(user_model.emotional_patterns, "stress_triggers", String[])
-    if !isempty(stress_triggers)
-        base *= "\n\nThis user's stress triggers: $(join(stress_triggers, ", "))"
-    end
-
-    base
-end
-
-function build_conversation_history()::Vector{Dict{String,Any}}
-    history = Dict{String,Any}[]
-    for h in GLOBAL_STATE.active_context[max(1, end-5):end]
-        push!(history, Dict(
-            "role" => "user",
-            "content" => h.raw
-        ))
-    end
-    history
-end
-
-function chat_gemma_simple(input::String)::String
-    response = chat_gemma(input)
-    get(response, "text", get(response, "error", "No response"))
-end
-
 function chat(input::String; session_id::Int64=0)::Dict{String,Any}
+    live_data = nothing
+    if is_live_data_query(input)
+        try
+            live_data = fetch_live_data_for_message(input)
+        catch e
+            @debug "Live data fetch failed" exception=e
+        end
+    end
+
+    prompt = build_prompt_with_context(input, live_data)
+
     try
         if TrainedModel.is_trained_loaded()
-            return TrainedModel.chat(input; session_id=session_id)
+            result = TrainedModel.chat(prompt; session_id=session_id)
+            track_basic_prediction(input, result)
+            return merge(result, Dict("session_id" => session_id, "live_data_used" => live_data !== nothing))
         end
     catch e
         @debug "TrainedModel not available" exception=e
     end
+
     try
-        text = IGSDCore.chat(input)
-        return Dict("text" => text, "model" => "IGSDCore-32M (INT8)", "session_id" => session_id)
+        if LlamaInference.is_loaded()
+            result = LlamaInference.chat(prompt; session_id=session_id)
+            if haskey(result, "text") && !isempty(result["text"]) && !haskey(result, "error")
+                result["model"] = "Llama-3.2-1B-Instruct (GGUF)"
+                result["live_data_used"] = live_data !== nothing
+                track_basic_prediction(input, result)
+                return result
+            end
+        end
     catch e
-        return LlamaInference.chat(input; session_id=session_id)
+        @debug "LlamaInference not available" exception=e
+    end
+
+    try
+        text = chat_template(input; session_id=session_id)
+        return Dict("text" => text, "model" => "IngExuity-Module-Pipeline", "session_id" => session_id)
+    catch e
+        return Dict("error" => string(e), "text" => "", "session_id" => session_id)
+    end
+end
+
+function build_prompt_with_context(input::String, live_data::Union{Dict{String,Any},Nothing})::String
+    if live_data === nothing
+        return input
+    end
+
+    results = get(live_data, "results", [])
+    if isempty(results)
+        return input
+    end
+
+    top = results[1]
+    title = get(top, "title", "")
+    snippet = get(top, "snippet", "")
+    query_type = get(live_data, "query_type", "general")
+
+    context_prefix = if query_type == "weather"
+        "[Current weather: $snippet] "
+    elseif query_type == "stock"
+        "[Stock info: $snippet] "
+    elseif query_type == "news"
+        "[Latest news: $snippet] "
+    elseif query_type == "factual"
+        "[Info: $snippet] "
+    else
+        "[Current info: $snippet] "
+    end
+
+    return context_prefix * input
+end
+
+# Track basic prediction from direct LLM responses
+function track_basic_prediction(input::String, result::Dict{String,Any})
+    try
+        text = get(result, "text", "")
+        if isempty(text) return end
+        
+        # Initialize prediction_state if needed
+        if !isdefined(GLOBAL_STATE, :prediction_state) || GLOBAL_STATE.prediction_state === nothing
+            GLOBAL_STATE.prediction_state = Types.PredictionState()
+        end
+        
+        # Basic prediction: user needs info/support (positional constructor)
+        pred = Types.Prediction(
+            "continue_conversation",
+            "supportive_response",
+            0.6,
+            Symbol[:direct_llm],
+            Dates.now()
+        )
+        
+        # Simple reaction: assume positive if response is non-empty
+        reaction = Dict{Symbol,Any}(:emotional_shift => :neutral, :engagement => 1.0)
+        
+        # Update prediction stats
+        Predictions.update_from_outcome!(GLOBAL_STATE.prediction_state, pred, true)
+        
+        # Store in memory
+        Memory.store("User: $input", source=:conversation)
+        Memory.store("IngExuity: $text", source=:response)
+        
+        # Debug: log updated intelligence
+        intel = GLOBAL_STATE.prediction_state.intelligence
+        @info "Prediction tracked: correct=$(intel.correct_predictions), total=$(intel.total_predictions)"
+    catch e
+        @warn "Prediction tracking failed" exception=e
     end
 end
 
@@ -347,6 +316,21 @@ end
 
 to_json(d::Dict) = json_value(d)
 
+function start_llama_model()
+    try
+        model_path = joinpath(@__DIR__, "..", "models", "Llama-3.2-1B-Instruct-Q4_K_M.gguf")
+        if isfile(model_path)
+            @info "Pre-loading Llama 3.2 model from: $model_path"
+            LlamaInference.load_llama_model(model_path=model_path)
+            @info "Llama 3.2 model ready"
+        else
+            @warn "Llama 3.2 GGUF not found at: $model_path"
+        end
+    catch e
+        @warn "Could not pre-load Llama 3.2: $e"
+    end
+end
+
 # ============================================================================
 # Minimal HTTP server
 # ============================================================================
@@ -359,11 +343,10 @@ function handle_request(req::HTTP.Request)::HTTP.Response
     elseif target == "/api/chat" && HTTP.method(req) == "POST"
         body = String(req.body)
         m = match(r"\"message\"\s*:\s*\"([^\"]+)\"", body)
-        input = m !== nothing ? m[1] : ""
+        input = m !== nothing ? String(m[1]) : ""
         isempty(input) && return HTTP.Response(200, ["Content-Type" => "application/json"], body=to_json(Dict("error" => "no message")))
-response = chat(input)
-        # Return full response including actions, audio, etc
-        return HTTP.Response(200, ["Content-Type" => "application/json"], body=to_json(response))
+chat_response = chat(input)
+        return HTTP.Response(200, ["Content-Type" => "application/json"], body=to_json(chat_response))
     elseif target == "/api/predict"
         return HTTP.Response(200, ["Content-Type" => "application/json"], body=to_json(Dict("predictions" => predict_user())))
     elseif target == "/api/intelligence"
@@ -379,7 +362,7 @@ response = chat(input)
         try
             model_path = LlamaInference.load_llama_model()
             return HTTP.Response(200, ["Content-Type" => "application/json"],
-                body=to_json(Dict("loaded" => true, "model" => "TinyLlama-1.1B")))
+                body=to_json(Dict("loaded" => true, "model" => "Llama-3.2-1B-Instruct")))
         catch e
             return HTTP.Response(500, ["Content-Type" => "application/json"],
                 body=to_json(Dict("error" => string(e))))
@@ -389,7 +372,7 @@ response = chat(input)
         try
             model_path = TrainedModel.load_trained_model()
             return HTTP.Response(200, ["Content-Type" => "application/json"],
-                body=to_json(Dict("loaded" => true, "model" => "TinyLlama-1.1B-LoRA")))
+                body=to_json(Dict("loaded" => true, "model" => "Llama-3.2-1B-Instruct-LoRA")))
         catch e
             return HTTP.Response(500, ["Content-Type" => "application/json"],
                 body=to_json(Dict("error" => string(e))))
@@ -399,14 +382,6 @@ response = chat(input)
         info = TrainedModel.get_model_info()
         return HTTP.Response(200, ["Content-Type" => "application/json"], body=to_json(info))
 
-    elseif target == "/api/gemma/load" && HTTP.method(req) == "POST"
-        ok = GemmaProvider.load_model(GEMMA_LLM)
-        return HTTP.Response(200, ["Content-Type" => "application/json"],
-            body=to_json(Dict("loaded" => ok)))
-    elseif target == "/api/gemma/unload" && HTTP.method(req) == "POST"
-        ok = GemmaProvider.unload_model(GEMMA_LLM)
-        return HTTP.Response(200, ["Content-Type" => "application/json"],
-            body=to_json(Dict("unloaded" => ok)))
     elseif target == "/"
         return HTTP.Response(200, ["Content-Type" => "text/html"], body=HTML_UI)
     else
@@ -459,20 +434,13 @@ async function send() {
   }
   chat.scrollTop = chat.scrollHeight;
   updateStats();
-  updateGemmaStatus();
 }
 async function updateStats() {
   const r = await fetch('/api/intelligence');
   const d = await r.json();
   document.getElementById('stats').innerText = 'Intelligence: ' + d.correct + '/' + d.total + ' predictions';
 }
-async function updateGemmaStatus() {
-  const r = await fetch('/api/gemma/status');
-  const d = await r.json();
-  document.getElementById('status').innerText = 'Gemma: ' + d.status + (d.capabilities && d.capabilities.features ? ' | ' + d.capabilities.features.join(', ') : '');
-}
 updateStats();
-updateGemmaStatus();
 </script>
 </body>
 </html>
@@ -487,6 +455,6 @@ function server_port()
     end
 end
 
-start() = HTTP.serve(handle_request, "0.0.0.0", server_port())
+start() = (start_llama_model(); HTTP.serve(handle_request, "0.0.0.0", server_port()))
 
 end # module

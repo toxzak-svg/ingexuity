@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-drumroll.py — Run inference with the trained TinyLlama LoRA model
+drumroll.py — Run inference with the trained Llama 3.2 LoRA model
 Usage: python drumroll.py "Your prompt here"
 """
 
@@ -11,7 +11,7 @@ import sys
 import os
 
 # Model paths
-BASE_MODEL = "TinyLlama/TinyLlama-1.1B-chat-v1.0"
+BASE_MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 LORA_ADAPTER_PATH = "models/trained_model/notebooks/my_weights"
 
 def load_model():

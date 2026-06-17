@@ -1,12 +1,12 @@
 # ============================================================================
-# LoRA Configuration for TinyLlama Fine-tuning
+# LoRA Configuration for Llama 3.2 Fine-tuning
 # ============================================================================
-# This file defines the LoRA adapter configuration used by train_tinyllama.py
+# This file defines the LoRA adapter configuration used by train_llama.py
 # ============================================================================
 
 lora_config:
   # LoRA rank - higher = more capacity, more VRAM needed
-  # 32 is good balance for 1.1B model on 16GB GPU
+  # 32 is good balance for 1B model on 16GB GPU
   rank: 32
   
   # LoRA alpha - typically 2x rank
@@ -16,7 +16,7 @@ lora_config:
   dropout: 0.05
   
   # Target modules for LoRA injection
-  # These are the attention and FFN layers in TinyLlama
+  # These are the attention and FFN layers in Llama 3.2
   target_modules:
     - q_proj   # Query projection in attention
     - k_proj   # Key projection in attention
@@ -69,7 +69,7 @@ optimization:
 
 output:
   # Output directory for checkpoints
-  output_dir: "./tinyllama_finetuned"
+  output_dir: "./llama3_finetuned"
   
   # Save checkpoint every N steps
   save_steps: 100

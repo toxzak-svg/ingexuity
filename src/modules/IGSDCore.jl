@@ -173,9 +173,10 @@ end
 
 function causal_pad(x::Matrix{Int16}, kernel_size::Int)::Matrix{Int16}
     T = size(x, 2)
+    d = size(x, 1)
     if T < kernel_size
         padding = kernel_size - T
-        return hcat(fill(INT16_MIN, d_model, padding), x)
+        return hcat(fill(INT16_MIN, d, padding), x)
     end
     return x
 end

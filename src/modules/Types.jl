@@ -18,7 +18,8 @@ export CommunicationStyle, SystemState, ResponseTone,
        RESPONSE_TONE_MINIMAL, RESPONSE_TONE_STAYING_PRESENT,
        HumanInput, UserModel, SelfModel, InternalEmotional,
        Prediction, SimulationResult, Response, Output,
-       Intelligence, Memory, PredictionState, ConversationState
+       Intelligence, Memory, PredictionState, ConversationState,
+       WebSearchResult, LiveDataQuery
 
 # ----------------------------------------------------------------------------
 # Enums
@@ -195,5 +196,77 @@ ConversationState(session_id::Int64) = ConversationState(
     session_id, 0, UserModel(), SelfModel(),
     InternalEmotional(), PredictionState(), HumanInput[], 0
 )
+
+# ----------------------------------------------------------------------------
+# Live data types for real-time knowledge
+# ----------------------------------------------------------------------------
+
+"""A web search result with title, snippet, and URL"""
+struct WebSearchResult
+    title::String
+    snippet::String
+    url::String
+    relevance::Float64
+end
+
+"""A detected query that requires live data (not in base model knowledge)"""
+struct LiveDataQuery
+    query::String
+    query_type::Symbol
+    confidence::Float64
+    needs_verification::Bool
+end
+
+const LIVE_DATA_INDICATORS = [
+    "today", "current", "latest", "now", "right now", "recently",
+    "news", "stock", "weather", "price", "score", "live",
+    "happening", "what's going on", "what is going on",
+    "tell me about the", "what about the",
+    "how is the", "how are the", "is the", "are the"
+]
+
+const FACTUAL_QUERY_TYPES = [
+    :news, :weather, :stock, :score, :price, :current_events,
+    :sports, :finance, :technology, :politics
+]
+
+function requires_live_data(input::String)::Bool
+    lower = lowercase(input)
+    any(occursin(ind, lower) for ind in LIVE_DATA_INDICATORS)
+end
+
+function detect_live_data_query(input::String)::Union{LiveDataQuery,Nothing}
+    if !requires_live_data(input)
+        return nothing
+    end
+    
+    lower = lowercase(input)
+    query_type = :general
+    confidence = 0.5
+    
+    if any(occursin(w, lower) for w in ["weather", "temperature", "rain", "sun", "forecast"])
+        query_type = :weather
+        confidence = 0.9
+    elseif any(occursin(w, lower) for w in ["stock", "market", "shares", "trading", "nasdaq", "dow"])
+        query_type = :stock
+        confidence = 0.9
+    elseif any(occursin(w, lower) for w in ["news", "happening", "latest", "recent"])
+        query_type = :news
+        confidence = 0.8
+    elseif any(occursin(w, lower) for w in ["score", "game", "team", "match", "result"])
+        query_type = :score
+        confidence = 0.85
+    elseif any(occursin(w, lower) for w in ["price", "cost", "buy", "sell", "dollar", "euro", "yen"])
+        query_type = :price
+        confidence = 0.8
+    elseif any(occursin(w, lower) for w in ["who won", "who is", "what is the", "where is"])
+        query_type = :factual
+        confidence = 0.7
+    else
+        confidence = 0.6
+    end
+    
+    LiveDataQuery(input, query_type, confidence, true)
+end
 
 end # module Types

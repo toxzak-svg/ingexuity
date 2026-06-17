@@ -1,6 +1,6 @@
 # ============================================================================
 # TrainedModel.jl — LoRA Adapter Loading & Inference for IngExuity
-# Loads TinyLlama base + LoRA adapter from trained_model directory
+# Loads Llama 3.2 base + LoRA adapter from trained_model directory
 # ============================================================================
 module TrainedModel
 
@@ -9,7 +9,7 @@ using LlamaCpp: run_llama
 
 export TrainedLLM, load_trained_model, chat_trained, is_trained_loaded
 
-const ADAPTER_PATH = joinpath(@__DIR__, "..", "trained_model", "notebooks", "my_weights")
+const ADAPTER_PATH = joinpath(@__DIR__, "..", "models", "trained_model", "notebooks", "my_weights")
 const BASE_MODEL_PATH = Ref{Union{String, Nothing}}(nothing)
 const ADAPTER_LOADED = Ref{Bool}(false)
 
@@ -47,7 +47,7 @@ function load_trained_model(;
 end
 
 function download_base_model(;
-    dest::String=joinpath(tempdir(), "tinyllama-1.1b-chat.Q4_K_M.gguf"),
+    dest::String=joinpath(tempdir(), "Llama-3.2-1B-Instruct-Q4_K_M.gguf"),
     force::Bool=false
 )::String
     if isfile(dest) && !force
@@ -55,9 +55,9 @@ function download_base_model(;
         return dest
     end
 
-    url = "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
+    url = "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf"
 
-    @info "Downloading TinyLlama 1.1B Q4_K_M base model..."
+    @info "Downloading Llama 3.2 1B Instruct Q4_K_M base model..."
     Base.download(url, dest)
     @info "Download complete! Base model saved to: $dest"
     return dest
@@ -91,7 +91,7 @@ function chat_trained(
         return Dict(
             "text" => strip(result),
             "session_id" => session_id,
-            "model" => "TinyLlama-1.1B-LoRA (r=32)"
+            "model" => "Llama-3.2-1B-Instruct-LoRA (r=32)"
         )
     catch e
         return Dict(

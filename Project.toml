@@ -2,7 +2,7 @@ name = "IngExuity"
 uuid = "3f2a4c1b-8e3d-4f5a-9b7c-1d2e3f4a5b6c"
 version = "0.1.0"
 authors = ["Zachary Maronek"]
-julia = "1.10"
+julia = "1.12"
 
 [deps]
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"

@@ -24,7 +24,7 @@ function predict_trajectory(user_model::UserModelType, internal::InternalEmotion
         if !isempty(cycles) && length(cycles) >= 2
             intervals = Float64[]
             for i in 2:length(cycles)
-                diff_ms = (cycles[i].instant - cycles[i-1].instant).value
+                diff_ms = (cycles[i] - cycles[i-1]).value
                 diff_hours = diff_ms / (1000.0 * 60.0 * 60.0)
                 push!(intervals, diff_hours)
             end

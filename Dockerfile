@@ -1,4 +1,4 @@
-FROM julia:1.10
+FROM julia:1.12
 
 WORKDIR /app
 
@@ -16,7 +16,11 @@ COPY Project.toml .
 COPY src/ src/
 COPY python/ python/
 
+# Install Python deps and export GPT-2 weights to Julia binary
+RUN mkdir -p models
 RUN pip install --no-cache-dir --break-system-packages -r python/requirements.txt
+COPY scripts/export_gpt2_weights.py scripts/
+RUN python scripts/export_gpt2_weights.py && rm scripts/export_gpt2_weights.py
 
 RUN julia --project=. -e 'using Pkg; Pkg.instantiate()'
 RUN julia --project=. -e 'using IngExuity'

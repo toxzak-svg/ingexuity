@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # ============================================================================
-# kaggle_train.py — Run TinyLlama LoRA training on Kaggle
+# kaggle_train.py — Run Llama 3.2 LoRA training on Kaggle
 # ============================================================================
 # Usage on Kaggle:
-# 1. Upload train_tinyllama.py and requirements.txt to your Kaggle dataset
+# 1. Upload train_llama.py and requirements.txt to your Kaggle dataset
 # 2. Create a new Notebook with GPU accelerator (P100)
 # 3. Upload your training data as a Kaggle dataset
-# 4. Run this script or import train_tinyllama directly
+# 4. Run this script or import train_llama directly
 # ============================================================================
 
 import os
@@ -16,19 +16,19 @@ import sys
 sys.path.insert(0, '/path/to/your/dataset')
 
 # Import and run training
-from train_tinyllama import TrainingConfig, load_base_model, setup_lora, load_dataset, train
+from train_llama import TrainingConfig, load_base_model, setup_lora, load_dataset, train
 
 def main():
     # Kaggle dataset path (adjust to your dataset name)
     DATA_PATH = "/kaggle/input/your-training-data/train.jsonl"
-    OUTPUT_DIR = "/kaggle/working/tinyllama_finetuned"
+    OUTPUT_DIR = "/kaggle/working/llama3_finetuned"
     
     # Create output directory
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     
     # Configuration optimized for Kaggle P100 (16GB VRAM)
     config = TrainingConfig(
-        model_name="TinyLlama/TinyLlama-1.1B-chat-v1.0",
+        model_name="meta-llama/Llama-3.2-1B-Instruct",
         output_dir=OUTPUT_DIR,
         num_epochs=3,
         batch_size=4,

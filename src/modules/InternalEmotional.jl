@@ -94,7 +94,7 @@ function compute_valence(words::Vector{<:AbstractString}, raw_lower::String)::Fl
     valence = 0.0
 
     if neg_count > 0
-        valence = min(-0.3 * sqrt(neg_count), -0.9)
+        valence = max(-0.9, -0.3 * sqrt(neg_count))
     elseif pos_count > 0
         valence = min(0.3 * sqrt(pos_count), 0.9)
     end

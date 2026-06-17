@@ -7,6 +7,7 @@ module NanoGPT
 using Random
 using Statistics
 import StatsBase
+using JSON
 
 export TransformerModel, TransformerConfig, SimpleTokenizer, generate, chat_local
 
@@ -17,10 +18,10 @@ export TransformerModel, TransformerConfig, SimpleTokenizer, generate, chat_loca
 Base.@kwdef mutable struct TransformerConfig
     vocab_size::Int = 50257
     max_seq_len::Int = 1024
-    n_embed::Int = 384
-    n_heads::Int = 6
-    n_layers::Int = 6
-    n_hidden::Int = 1536
+    n_embed::Int = 768
+    n_heads::Int = 12
+    n_layers::Int = 12
+    n_hidden::Int = 3072
     dropout::Float32 = 0.0f0
     bias::Bool = true
 end
@@ -105,6 +106,10 @@ struct CausalAttention
     Wk::Matrix{Float32}
     Wv::Matrix{Float32}
     Wo::Matrix{Float32}
+    bq::Vector{Float32}
+    bk::Vector{Float32}
+    bv::Vector{Float32}
+    bo::Vector{Float32}
     n_heads::Int
     head_dim::Int
     scale::Float32
@@ -120,8 +125,12 @@ function CausalAttention(n_embed::Int, n_heads::Int)
     Wk = randn(rng, Float32, n_embed, n_embed) * 0.02f0
     Wv = randn(rng, Float32, n_embed, n_embed) * 0.02f0
     Wo = randn(rng, Float32, n_embed, n_embed) * 0.02f0
+    bq = zeros(Float32, n_embed)
+    bk = zeros(Float32, n_embed)
+    bv = zeros(Float32, n_embed)
+    bo = zeros(Float32, n_embed)
 
-    return CausalAttention(Wq, Wk, Wv, Wo, n_heads, head_dim, scale)
+    return CausalAttention(Wq, Wk, Wv, Wo, bq, bk, bv, bo, n_heads, head_dim, scale)
 end
 
 function (attn::CausalAttention)(x::AbstractMatrix{Float32})::AbstractMatrix{Float32}
@@ -129,9 +138,9 @@ function (attn::CausalAttention)(x::AbstractMatrix{Float32})::AbstractMatrix{Flo
     n_heads = attn.n_heads
     head_dim = attn.head_dim
 
-    Q = attn.Wq' * x
-    K = attn.Wk' * x
-    V = attn.Wv' * x
+    Q = attn.Wq' * x .+ attn.bq
+    K = attn.Wk' * x .+ attn.bk
+    V = attn.Wv' * x .+ attn.bv
 
     Q_seq = reshape(Q, n_heads, head_dim, T)
     K_seq = reshape(K, n_heads, head_dim, T)
@@ -172,7 +181,7 @@ function (attn::CausalAttention)(x::AbstractMatrix{Float32})::AbstractMatrix{Flo
         end
     end
 
-    return attn.Wo' * out
+    return attn.Wo' * out .+ attn.bo
 end
 
 # ============================================================================
@@ -472,11 +481,168 @@ function decode(tok::SimpleTokenizer, tokens::Vector{Int})::String
 end
 
 # ============================================================================
+# GPT-2 Tokenizer
+# ============================================================================
+
+struct GPT2Tokenizer
+    vocab::Dict{String, Int}
+    reverse_vocab::Dict{Int, String}
+    merges::Vector{Tuple{String, String}}
+    byte_encoder::Dict{UInt8, String}
+    byte_decoder::Dict{String, UInt8}
+    eot_token::Int
+end
+
+function gpt2_byte_encoder()::Dict{UInt8, String}
+    encoder = Dict{UInt8, String}()
+    bs = UInt8[]
+    for b in 0x21:0x7e; push!(bs, b); end
+    for b in 0xa1:0xac; push!(bs, b); end
+    for b in 0xae:0xff; push!(bs, b); end
+    n = 0
+    for b in 0x00:0xff
+        if !(b in bs)
+            push!(bs, b)
+            encoder[b] = string(Char(256 + n))
+            n += 1
+        else
+            encoder[b] = string(Char(b))
+        end
+    end
+    return encoder
+end
+
+function gpt2_byte_decoder(encoder::Dict{UInt8, String})::Dict{String, UInt8}
+    return Dict(v => k for (k, v) in encoder)
+end
+
+function GPT2Tokenizer(vocab_path::String, merges_path::String)
+    vocab = JSON.parsefile(vocab_path)
+    reverse_vocab = Dict{Int, String}(v => k for (k, v) in vocab)
+
+    merges = Tuple{String, String}[]
+    for line in eachline(merges_path)
+        startswith(line, "#") && continue
+        isempty(strip(line)) && continue
+        parts = split(strip(line))
+        if length(parts) == 2
+            push!(merges, (parts[1], parts[2]))
+        end
+    end
+
+    encoder = gpt2_byte_encoder()
+    decoder = gpt2_byte_decoder(encoder)
+    eot = get(vocab, "<|endoftext|>", 50256)
+
+    return GPT2Tokenizer(vocab, reverse_vocab, merges, encoder, decoder, eot)
+end
+
+function bpe(tok::GPT2Tokenizer, word::String)::Vector{String}
+    chars = [string(c) for c in word]
+    if length(chars) == 1
+        return chars
+    end
+
+    pairs = Dict{Tuple{String,String}, Int}()
+    for i in 1:length(chars)-1
+        pairs[(chars[i], chars[i+1])] = get(pairs, (chars[i], chars[i+1]), 0) + 1
+    end
+
+    while true
+        best_pair = nothing
+        best_rank = typemax(Int)
+        for (pair, _) in pairs
+            idx = findfirst(isequal(pair), tok.merges)
+            if idx !== nothing && idx < best_rank
+                best_rank = idx
+                best_pair = pair
+            end
+        end
+
+        best_pair === nothing && break
+
+        new_chars = String[]
+        i = 1
+        while i <= length(chars)
+            if i < length(chars) && (chars[i], chars[i+1]) == best_pair
+                push!(new_chars, chars[i] * chars[i+1])
+                i += 2
+            else
+                push!(new_chars, chars[i])
+                i += 1
+            end
+        end
+        chars = new_chars
+
+        if length(chars) == 1
+            break
+        end
+
+        pairs = Dict{Tuple{String,String}, Int}()
+        for i in 1:length(chars)-1
+            pairs[(chars[i], chars[i+1])] = get(pairs, (chars[i], chars[i+1]), 0) + 1
+        end
+    end
+
+    return chars
+end
+
+function encode(tok::GPT2Tokenizer, text::String)::Vector{Int}
+    text_bytes = Vector{UInt8}(text)
+    encoded = [tok.byte_encoder[b] for b in text_bytes]
+    pre_tokenized = split(join(encoded), " ")
+
+    token_ids = Int[]
+    for word in pre_tokenized
+        word = strip(word)
+        isempty(word) && continue
+        bpe_tokens = bpe(tok, word)
+        for t in bpe_tokens
+            id = get(tok.vocab, t, nothing)
+            if id !== nothing
+                push!(token_ids, id)
+            end
+        end
+    end
+
+    return token_ids
+end
+
+function encode_with_eot(tok::GPT2Tokenizer, text::String)::Vector{Int}
+    tokens = encode(tok, text)
+    push!(tokens, tok.eot_token)
+    return tokens
+end
+
+function decode(tok::GPT2Tokenizer, token_ids::Vector{Int})::String
+    tokens = String[]
+    for id in token_ids
+        id == tok.eot_token && break
+        t = get(tok.reverse_vocab, id, nothing)
+        t !== nothing && push!(tokens, t)
+    end
+    text = join(tokens)
+    bytes = UInt8[]
+    i = 1
+    while i <= length(text)
+        c = text[i]
+        b = get(tok.byte_decoder, string(c), nothing)
+        if b !== nothing
+            push!(bytes, b)
+        else
+            push!(bytes, UInt8(c))
+        end
+        i += 1
+    end
+    return String(bytes)
+end
+
+# ============================================================================
 # Model Loading & Chat
 # ============================================================================
 
 const MODEL = Ref{Union{TransformerModel, Nothing}}(nothing)
-const TOKENIZER = Ref{Union{SimpleTokenizer, Nothing}}(nothing)
+const TOKENIZER = Ref{Union{SimpleTokenizer, GPT2Tokenizer, Nothing}}(nothing)
 
 function load_model(config::TransformerConfig=TransformerConfig())
     model = TransformerModel(config)
@@ -494,9 +660,119 @@ function is_loaded()::Bool
     return MODEL[] !== nothing && TOKENIZER[] !== nothing
 end
 
+# ============================================================================
+# Pretrained weight loading (GPT-2 binary format)
+# ============================================================================
+
+const WEIGHTS_PATH = Ref{Union{String, Nothing}}(nothing)
+
+"""
+    load_pretrained(weights_path::String)
+
+Load GPT-2 pretrained weights from a binary file exported by
+scripts/export_gpt2_weights.py. The file format is:
+1. A JSON header string (null-terminated)
+2. Raw float32 data for each tensor in order
+"""
+function load_pretrained(weights_path::String;
+                         vocab_path::Union{String,Nothing}=nothing,
+                         merges_path::Union{String,Nothing}=nothing)
+    @info "Loading pretrained GPT-2 weights from: $weights_path"
+
+    if vocab_path !== nothing && merges_path !== nothing
+        tok = GPT2Tokenizer(vocab_path, merges_path)
+        TOKENIZER[] = tok
+        @info "GPT-2 tokenizer loaded (vocab: $(length(tok.vocab)) tokens)"
+    end
+
+    data = read(weights_path)
+
+    null_pos = findfirst(isequal(0x00), data)
+    if null_pos === nothing
+        error("Invalid weight file: no null terminator found")
+    end
+
+    header_bytes = data[1:null_pos[1]-1]
+    header_str = String(header_bytes)
+    tensor_info = JSON.parse(header_str)
+
+    offset = null_pos[1] + 1
+    raw_floats = reinterpret(Float32, data[offset:end])
+    pos = Ref(1)
+
+    function read_tensor(name::String)
+        info = tensor_info[name]
+        shape = info["shape"]
+        shape_t = Tuple(reverse(shape))
+        count = prod(Int, shape)
+        w = reshape(raw_floats[pos[]:pos[]+count-1], shape_t)
+        pos[] += count
+        return w
+    end
+
+    cfg = TransformerConfig()
+    n = cfg.n_embed
+    wte = read_tensor("wte.weight")
+    wpe = read_tensor("wpe.weight")
+
+    blocks = TransformerBlock[]
+    for i in 0:11
+        ln1_w = vec(read_tensor("h.$i.ln_1.weight"))
+        ln1_b = vec(read_tensor("h.$i.ln_1.bias"))
+        ln2_w = vec(read_tensor("h.$i.ln_2.weight"))
+        ln2_b = vec(read_tensor("h.$i.ln_2.bias"))
+
+        ca_w = read_tensor("h.$i.attn.c_attn.weight")
+        ca_b = vec(read_tensor("h.$i.attn.c_attn.bias"))
+        cp_w = read_tensor("h.$i.attn.c_proj.weight")
+        cp_b = vec(read_tensor("h.$i.attn.c_proj.bias"))
+
+        Wq = ca_w[1:n, :]'
+        Wk = ca_w[n+1:2*n, :]'
+        Wv = ca_w[2*n+1:3*n, :]'
+        bq = ca_b[1:n]
+        bk = ca_b[n+1:2*n]
+        bv = ca_b[2*n+1:3*n]
+        Wo = cp_w'
+        bo = cp_b
+
+        fc_w = read_tensor("h.$i.mlp.c_fc.weight")
+        fc_b = vec(read_tensor("h.$i.mlp.c_fc.bias"))
+        mp_w = read_tensor("h.$i.mlp.c_proj.weight")
+        mp_b = vec(read_tensor("h.$i.mlp.c_proj.bias"))
+
+        W1 = fc_w
+        b1 = fc_b
+        W2 = mp_w
+        b2 = mp_b
+
+        hd = n ÷ cfg.n_heads
+        attn = CausalAttention(Wq, Wk, Wv, Wo, bq, bk, bv, bo, cfg.n_heads, hd, Float32(1.0 / sqrt(hd)))
+        ff = FeedForward(W1, b1, W2, b2, gelu)
+        push!(blocks, TransformerBlock(attn, ff, LayerNorm(ln1_w, ln1_b, 1f-5, n), LayerNorm(ln2_w, ln2_b, 1f-5, n)))
+    end
+
+    ln_f_w = vec(read_tensor("ln_f.weight"))
+    ln_f_b = vec(read_tensor("ln_f.bias"))
+    final_ln = LayerNorm(ln_f_w, ln_f_b, 1f-5, n)
+
+    model = TransformerModel(cfg, wte, wpe, blocks, final_ln, wte)
+    WEIGHTS_PATH[] = weights_path
+
+    return model
+end
+
+function load_local_model(weights_path::String;
+                          vocab_path::Union{String,Nothing}=nothing,
+                          merges_path::Union{String,Nothing}=nothing)
+    model = load_pretrained(weights_path; vocab_path=vocab_path, merges_path=merges_path)
+    MODEL[] = model
+    return model
+end
+
 function chat_local(input::String; session_id::Int64=0)::Dict{String,Any}
     if !is_loaded()
-        return Dict("error" => "Model not loaded. Call load_model() first.", "text" => "")
+        return Dict("error" => "Model not loaded. Call load_local_model() first.", "text" => "")
     end
 
     model = MODEL[]

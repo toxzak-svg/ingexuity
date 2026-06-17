@@ -1,7 +1,7 @@
 # ============================================================================
 # LlamaInference.jl — LlamaCpp wrapper for IngExuity
 # Uses llama.cpp for real pretrained model inference
-# Supports both base TinyLlama and custom fine-tuned GGUF files
+# Supports both base Llama 3.2 and custom fine-tuned GGUF files
 # ============================================================================
 module LlamaInference
 
@@ -14,12 +14,12 @@ const MODEL_PATH = Ref{Union{String, Nothing}}(nothing)
 const MODEL_TYPE = Ref{String}("base")  # "base" or "finetuned"
 
 """
-    download_tinyllama(; dest::String, force::Bool)
+    download_base_model(; dest::String, force::Bool)
 
-Download the base TinyLlama 1.1B Q4_K_M GGUF model (~634MB).
+Download the base Llama 3.2 1B Instruct Q4_K_M GGUF model (~700MB).
 """
-function download_tinyllama(;
-    dest::String=joinpath(tempdir(), "tinyllama-1.1b-chat.Q4_K_M.gguf"),
+function download_base_model(;
+    dest::String=joinpath(tempdir(), "Llama-3.2-1B-Instruct-Q4_K_M.gguf"),
     force::Bool=false
 )::String
     if isfile(dest) && !force
@@ -27,9 +27,9 @@ function download_tinyllama(;
         return dest
     end
 
-    url = "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
+    url = "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf"
 
-    @info "Downloading TinyLlama 1.1B Q4_K_M (~634MB)..."
+    @info "Downloading Llama 3.2 1B Instruct Q4_K_M (~700MB)..."
     @info "This may take a while depending on your connection..."
 
     Base.download(url, dest)
@@ -41,7 +41,7 @@ end
 """
     load_llama_model(; model_path, n_gpu_layers, n_threads)
 
-Load the base TinyLlama model. Downloads if not present.
+Load the base Llama 3.2 model. Downloads if not present.
 """
 function load_llama_model(;
     model_path::Union{String, Nothing}=nothing,
@@ -49,7 +49,7 @@ function load_llama_model(;
     n_threads::Int=4
 )::String
     if model_path === nothing
-        model_path = download_tinyllama()
+        model_path = download_base_model()
     end
 
     if !isfile(model_path)
@@ -118,13 +118,14 @@ function chat_llama(
             model=model_path,
             prompt=prompt,
             n_gpu_layers=n_gpu_layers,
-            nthreads=n_threads
+            nthreads=n_threads,
+            max_tokens=max_tokens
         )
 
         return Dict(
             "text" => strip(result),
             "session_id" => session_id,
-            "model" => "TinyLlama-1.1B-Chat (GGUF via llama.cpp)"
+            "model" => "Llama-3.2-1B-Instruct (GGUF via llama.cpp)"
         )
     catch e
         return Dict(
@@ -152,7 +153,7 @@ function get_model_info()::Dict{String, Any}
         return Dict("status" => "no model loaded")
     end
 
-    model_type_label = MODEL_TYPE[] == "finetuned" ? "TinyLlama-1.1B-Chat (Fine-tuned)" : "TinyLlama-1.1B-Chat (Q4_K_M)"
+    model_type_label = MODEL_TYPE[] == "finetuned" ? "Llama-3.2-1B-Instruct (Fine-tuned)" : "Llama-3.2-1B-Instruct (Q4_K_M)"
 
     return Dict(
         "status" => "loaded",
@@ -172,10 +173,10 @@ Checks common locations where Kaggle/Paperspace save training outputs.
 """
 function get_training_output_path()::Union{String, Nothing}
     candidates = [
-        joinpath("tinyllama_finetuned", "final"),  # Local training output
-        joinpath(".", "tinyllama_finetuned", "final"),
-        joinpath(pwd(), "tinyllama_finetuned", "final"),
-        joinpath(homedir(), "tinyllama_finetuned", "final")  # Home directory
+        joinpath("llama3_finetuned", "final"),  # Local training output
+        joinpath(".", "llama3_finetuned", "final"),
+        joinpath(pwd(), "llama3_finetuned", "final"),
+        joinpath(homedir(), "llama3_finetuned", "final")  # Home directory
     ]
 
     for path in candidates
@@ -200,7 +201,7 @@ function load_training_model(; n_gpu_layers::Int=0, n_threads::Int=4)::String
     path = get_training_output_path()
 
     if path === nothing
-        error("No fine-tuned model found. Train a model first with train_tinyllama.py")
+        error("No fine-tuned model found. Train a model first with train_llama.py")
     end
 
     return load_finetuned_model(path; n_gpu_layers=n_gpu_layers, n_threads=n_threads)

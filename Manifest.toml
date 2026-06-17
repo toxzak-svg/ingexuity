@@ -167,7 +167,7 @@ uuid = "076d061b-32b6-4027-95e0-9a2c6f6d7e74"
 version = "0.2.0"
 
 [[deps.IngExuity]]
-deps = ["Dates", "HTTP", "JSON", "ONNX", "Random", "Statistics", "StatsBase"]
+deps = ["Dates", "HTTP", "JSON", "LlamaCpp", "ONNX", "Random", "Statistics", "StatsBase"]
 path = "."
 uuid = "3f2a4c1b-8e3d-4f5a-9b7c-1d2e3f4a5b6c"
 version = "0.1.0"

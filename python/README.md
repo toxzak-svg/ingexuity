@@ -7,7 +7,8 @@ This directory contains Python scripts for model training and inference.
 | Script | Purpose |
 |--------|---------|
 | [`gemma_e2b_service.py`](gemma_e2b_service.py) | HTTP service for Gemma 4 E2B with function calling |
-| [`train_tinyllama.py`](train_tinyllama.py) | LoRA fine-tuning for TinyLlama 1.1B |
+| [`train_llama.py`](train_llama.py) | LoRA fine-tuning for Llama 3.2 1B |
+| [`train_llama_simple.py`](train_llama_simple.py) | Simplified LoRA fine-tuning for Llama 3.2 1B |
 | [`kaggle_train.py`](kaggle_train.py) | Kaggle-specific training runner (P100 GPU) |
 | [`paperspace_train.py`](paperspace_train.py) | Paperspace-specific training runner (M4000/RTX4000) |
 | [`lora_config.yaml`](lora_config.yaml) | LoRA hyperparameters configuration |
@@ -20,84 +21,55 @@ pip install -r requirements.txt
 
 ## Quick Start
 
-### 1. Fine-tune TinyLlama on Kaggle
+### 1. Fine-tune Llama 3.2 on Kaggle
 
 1. Create a Kaggle account and enable GPU (P100) in Notebook settings
 2. Upload your training data as a Kaggle dataset (JSONL format)
-3. Upload `train_tinyllama.py` and `requirements.txt`
+3. Upload `train_llama.py` and `requirements.txt`
 4. Run:
    ```python
    from kaggle_train import main
    main()
    ```
 
-### 2. Fine-tune TinyLlama on Paperspace
+### 2. Fine-tune Llama 3.2 on Paperspace
 
-1. Create a Paperspace account with free GPU tier
-2. Upload training data and scripts to your workspace
+1. Create a Paperspace notebook with free GPU
+2. Upload `train_llama.py` and your training data
 3. Run:
-   ```bash
-   python paperspace_train.py
+   ```python
+   from paperspace_train import main
+   main()
    ```
 
-### 3. Use Fine-tuned Model in Julia
+## After Training
 
-```julia
-using IngExuity
-using LlamaInference
+After fine-tuning, you'll get LoRA weights in the output directory (`./llama3_finetuned/final/`).
 
-# Load the base model
-load_llama_model()
+### Export to GGUF (for Julia integration)
 
-# Or load your custom fine-tuned model
-load_finetuned_model("/path/to/your/finetuned/model.gguf")
-
-# Generate text
-result = chat_llama("Hello, how are you?")
-println(result["text"])
+```bash
+python export_to_gguf.py
 ```
 
-## Training Data Format
+This merges the LoRA adapter with the base model and converts to GGUF format for use with `LlamaInference.jl`.
 
-Training data should be in JSONL format:
+### Test the fine-tuned model
 
-```jsonl
-{"text": "Your training example here"}
-{"text": "Another example"}
+```bash
+python drumroll.py "Your prompt here"
 ```
 
-Or JSON format:
+## Training Output Locations
 
-```json
-{
-  "data": [
-    "First example",
-    "Second example"
-  ]
-}
-```
+| Platform | Output Path |
+|----------|-------------|
+| Local | `./llama3_finetuned/final/` |
+| Kaggle | `/kaggle/working/llama3_finetuned/final/` |
+| Paperspace | `/storage/llama3_finetuned/final/` |
 
-## LoRA Configuration
+## Model Info
 
-Default settings optimized for 16GB GPU (Kaggle P100):
-- LoRA rank: 32
-- Batch size: 4
-- Learning rate: 2e-4
-- Epochs: 3
-- Max sequence length: 512
-
-For 8GB GPU (Paperspace M4000), reduce batch size to 2 and increase gradient accumulation to 16.
-
-## Output
-
-Fine-tuned models are saved to:
-- `./tinyllama_finetuned/final/` (local)
-- `/kaggle/working/tinyllama_finetuned/final/` (Kaggle)
-- `/storage/tinyllama_finetuned/final/` (Paperspace)
-
-## Notes
-
-- TinyLlama is ~1.1B parameters, quantized Q4_K_M is ~634MB
-- LoRA training only updates ~0.5-2% of parameters
-- Training with QLoRA (4-bit) requires ~6GB VRAM
-- Full fine-tuning is possible with ~16GB VRAM
+- Llama 3.2 1B is ~1.0B parameters, quantized Q4_K_M is ~700MB
+- 128K context window
+- Trained with the same LoRA configuration as the original setup

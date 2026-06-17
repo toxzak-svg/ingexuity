@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # ============================================================================
-# paperspace_train.py — Run TinyLlama LoRA training on Paperspace
+# paperspace_train.py — Run Llama 3.2 LoRA training on Paperspace
 # ============================================================================
 # Usage on Paperspace:
 # 1. Create a new notebook with free GPU (M4000 is good, or RTX 4000)
-# 2. Upload train_tinyllama.py and your training data
+# 2. Upload train_llama.py and your training data
 # 3. Set runtime to Python 3.10 with PyTorch
 # 4. Run this script
 # ============================================================================
@@ -19,12 +19,12 @@ import sys
 # Add python directory to path
 sys.path.insert(0, '.')
 
-from train_tinyllama import TrainingConfig, load_base_model, setup_lora, load_dataset, train
+from train_llama import TrainingConfig, load_base_model, setup_lora, load_dataset, train
 
 def main():
     # Paperspace storage path
     DATA_PATH = "./train_data.jsonl"
-    OUTPUT_DIR = "/storage/tinyllama_finetuned"
+    OUTPUT_DIR = "/storage/llama3_finetuned"
     
     # Create output directory
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -32,7 +32,7 @@ def main():
     # Configuration optimized for Paperspace M4000/RTX4000 (8GB VRAM)
     # Slightly smaller batch size than Kaggle due to 8GB vs 16GB
     config = TrainingConfig(
-        model_name="TinyLlama/TinyLlama-1.1B-chat-v1.0",
+        model_name="meta-llama/Llama-3.2-1B-Instruct",
         output_dir=OUTPUT_DIR,
         num_epochs=3,
         batch_size=2,  # Smaller batch for 8GB GPU

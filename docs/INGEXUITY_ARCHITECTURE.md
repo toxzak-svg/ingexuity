@@ -1,7 +1,7 @@
 # IngExuity — Architecture Specification
 
-**Version:** 1.4  
-**Date:** 2026-04-13 (updated 2026-04-28)  
+**Version:** 1.5  
+**Date:** 2026-04-13 (updated 2026-05-03)  
 **Author:** Zach Marone
 
 **LLM Note:** IngExuity uses a **Julia-native transformer** built with Flux.jl (see `SPEC.md`). `GemmaProvider.jl` is deprecated. All inference runs locally with no external API dependency.
@@ -36,6 +36,42 @@ Empathy is not a module. It is the output of three things working together:
 3. **Staying with it** — when you're stressed or emotionally charged, the system acknowledges first, then solves
 
 Not "don't solve." Solve after the person feels heard. That's the whole thing.
+
+---
+
+## Model Integration (v1.5)
+
+IngExuity supports multiple inference backends:
+
+| Backend | Module | Use Case |
+|---------|--------|----------|
+| **Trained LoRA** | [`TrainedModel.jl`](src/modules/TrainedModel.jl) | Custom fine-tuned model (PEFT adapter + base) |
+| **GGUF (llama.cpp)** | [`LlamaInference.jl`](src/modules/LlamaInference.jl) | Pre-quantized GGUF files, fully offline |
+| **NanoGPT (Pure Julia)** | [`NanoGPT.jl`](src/modules/NanoGPT.jl) | Lightweight Julia-native, no external deps |
+| **IGSDCore-32M** | [`IGSDCore.jl`](src/modules/IGSDCore.jl) | Tiny INT8 model for edge devices |
+
+### Trained Model Integration
+
+The trained LoRA adapter in `models/trained_model/notebooks/my_weights/` must be exported to GGUF before use:
+
+```bash
+# Install dependencies
+pip install -r python/requirements.txt
+
+# Export PEFT adapter → GGUF
+python python/export_to_gguf.py --model_path ./models/trained_model/notebooks/my_weights --output ./models/llama3-finetuned.Q4_K_M.gguf
+```
+
+Then load in Julia:
+```julia
+using IngExuity
+TrainedModel.load_trained_model()  # Downloads base if needed, loads adapter
+chat("Hello")  # Uses trained model
+```
+
+### Inference Priority
+
+[`chat()`](src/IngExuity.jl:294) checks backends in order: TrainedModel → IGSDCore → LlamaInference
 
 ---
 

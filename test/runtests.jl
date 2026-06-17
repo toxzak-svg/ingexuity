@@ -1,7 +1,7 @@
 #!/usr/bin/env julia
 # Run tests for IngExuity
-import Test
-push!(LOAD_PATH, joinpath(@__DIR__, "src"))
+using Test
+push!(LOAD_PATH, joinpath(@__DIR__, "..", "src"))
 using IngExuity
 
 @testset "IngExuity Test Suite" begin

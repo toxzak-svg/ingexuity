@@ -164,7 +164,7 @@ function tone_to_enum(tone)
     tone
 end
 
-function formulate(predictions, comprehension; tone=:direct)
+function formulate(predictions, comprehension; tone=:direct, live_context=nothing)
     topic = comprehension[:topic]
     is_question = comprehension[:is_question]
 
@@ -178,7 +178,44 @@ function formulate(predictions, comprehension; tone=:direct)
     idx = isempty(predictions) ? 1 : (length(predictions) % length(candidates)) + 1
     content = candidates[idx]
 
+    # Incorporate live data if available
+    if live_context !== nothing
+        content = _incorporate_live_data(content, live_context, is_question)
+    end
+
     ResponseType(content, tone_to_enum(tone), 0.8, 0.7, false)
+end
+
+function _incorporate_live_data(content::String, live_context::Dict{String,Any}, is_question::Bool)::String
+    context = get(live_context, "context", "")
+    if isempty(context)
+        return content
+    end
+
+    query_type = get(live_context, "query_type", "general")
+    results = get(live_context, "results", [])
+
+    if is_question && !isempty(results)
+        # For questions, provide a direct answer from live data
+        top_result = results[1]
+        title = get(top_result, "title", "")
+        snippet = get(top_result, "snippet", "")
+
+        if query_type == "weather"
+            return "Based on current conditions: $snippet"
+        elseif query_type == "stock"
+            return "Here's the latest on that: $snippet"
+        elseif query_type == "news"
+            return "Current news: $snippet"
+        elseif query_type == "factual"
+            return "$snippet (Source: $title)"
+        else
+            return "$snippet"
+        end
+    end
+
+    # For statements, acknowledge with live context
+    return content
 end
 
 function get_onboarding_response(turn_count::Int64)::ResponseType
