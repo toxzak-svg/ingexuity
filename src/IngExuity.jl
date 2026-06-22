@@ -4,7 +4,7 @@
 # ============================================================================
 module IngExuity
 
-using HTTP, Dates, Base.Iterators
+using HTTP, Dates, Base.Iterators, JSON
 
 # Module structure — 20 modules + Memory matching IngEnuity architecture v1.4
 include("modules/Types.jl")
@@ -25,8 +25,8 @@ include("modules/Research.jl")
 include("modules/CreativeIngenuity.jl")
 include("modules/Decision.jl")
 include("modules/Precognition.jl")
-include("modules/Predictions.jl")
 include("modules/SandboxSim.jl")
+include("modules/Predictions.jl")
 include("modules/Memory.jl")
 include("modules/Action.jl")
 include("modules/ReactionObservance.jl")
@@ -36,9 +36,14 @@ include("modules/Output.jl")
 include("modules/Understanding.jl")
 include("modules/Intelligence.jl")
 include("modules/LlamaInference.jl")
-include("modules/TrainedModel.jl")
-include("modules/NanoGPT.jl")
-include("modules/IGSDCore.jl")
+# v1: TrainedModel.jl (LoRA) and NanoGPT.jl/IGSDCore.jl (pure Julia) kept in tree
+# but disabled until validated. Single backend = LlamaCpp GGUF.
+# include("modules/TrainedModel.jl")
+# include("modules/NanoGPT.jl")
+# include("modules/IGSDCore.jl")
+
+# Bring live-data helpers into scope (defined in Research module)
+using .Research: is_live_data_query, fetch_live_data_for_message
 
 # ============================================================================
 # Conversation loop — the core IngEnuity experience
@@ -48,7 +53,7 @@ const GLOBAL_STATE = Types.ConversationState(0)
 
 function chat_template(input::String; session_id::Int64=0)::String
     human_input = HumanInput.process(input; session_id=session_id)
-    results = ResultsAnalysis.process(human_input, GLOBAL_STATE)
+    results = ResultsAnalysis.analyze_turn(human_input, GLOBAL_STATE)
     comprehension = Comprehension.comprehend(human_input)
     self_model = SelfModel.update(GLOBAL_STATE.self_model, human_input, comprehension)
     user_model = UserModel.update(GLOBAL_STATE.user_model, human_input, comprehension)
@@ -135,29 +140,22 @@ function build_stay_present_response(internal::Types.InternalEmotional, user_mod
 end
 
 # ============================================================================
-# LOCAL INFERENCE — Pure Julia NanoGPT
+# LOCAL INFERENCE — LlamaCpp GGUF (single backend for v1)
 # No external API. Runs fully offline on device.
+# NanoGPT/TrainedModel/IGSDCore are in the tree but disabled until validated.
 # ============================================================================
 
-const TRAINED_LLM = TrainedModel.TrainedLLM()
-
 function load_local_model()
-    @info "Loading NanoGPT model..."
-    model = NanoGPT.load_model()
-    @info "Model loaded. Now load tokenizer with load_local_tokenizer()"
-    return model
-end
-
-function load_local_tokenizer()
-    @info "Loading BPE tokenizer..."
-    tokenizer = NanoGPT.load_tokenizer()
-    @info "Tokenizer loaded."
-    return tokenizer
+    @info "Loading LlamaCpp GGUF model..."
+    return LlamaInference.load_llama_model()
 end
 
 function is_local_loaded()::Bool
-    NanoGPT.is_loaded()
+    LlamaInference.is_loaded()
 end
+
+# Kept as no-ops for API compatibility; v1 uses GGUF via LlamaInference.
+load_local_tokenizer() = nothing
 
 function chat(input::String; session_id::Int64=0)::Dict{String,Any}
     live_data = nothing
@@ -170,16 +168,6 @@ function chat(input::String; session_id::Int64=0)::Dict{String,Any}
     end
 
     prompt = build_prompt_with_context(input, live_data)
-
-    try
-        if TrainedModel.is_trained_loaded()
-            result = TrainedModel.chat(prompt; session_id=session_id)
-            track_basic_prediction(input, result)
-            return merge(result, Dict("session_id" => session_id, "live_data_used" => live_data !== nothing))
-        end
-    catch e
-        @debug "TrainedModel not available" exception=e
-    end
 
     try
         if LlamaInference.is_loaded()
@@ -322,6 +310,10 @@ function start_llama_model()
         if isfile(model_path)
             @info "Pre-loading Llama 3.2 model from: $model_path"
             LlamaInference.load_llama_model(model_path=model_path)
+            # Warm the model into llama.cpp's memory before the HTTP listener
+            # accepts traffic. Without this, the first /api/chat request pays
+            # a 5-15s cold-load penalty.
+            LlamaInference.warmup()
             @info "Llama 3.2 model ready"
         else
             @warn "Llama 3.2 GGUF not found at: $model_path"
@@ -341,12 +333,7 @@ function handle_request(req::HTTP.Request)::HTTP.Response
     if startswith(target, "/health")
         return HTTP.Response(200, ["Content-Type" => "text/plain"], "ok")
     elseif target == "/api/chat" && HTTP.method(req) == "POST"
-        body = String(req.body)
-        m = match(r"\"message\"\s*:\s*\"([^\"]+)\"", body)
-        input = m !== nothing ? String(m[1]) : ""
-        isempty(input) && return HTTP.Response(200, ["Content-Type" => "application/json"], body=to_json(Dict("error" => "no message")))
-chat_response = chat(input)
-        return HTTP.Response(200, ["Content-Type" => "application/json"], body=to_json(chat_response))
+        return handle_chat(req)
     elseif target == "/api/predict"
         return HTTP.Response(200, ["Content-Type" => "application/json"], body=to_json(Dict("predictions" => predict_user())))
     elseif target == "/api/intelligence"
@@ -368,25 +355,28 @@ chat_response = chat(input)
                 body=to_json(Dict("error" => string(e))))
         end
 
-    elseif target == "/api/trained/load" && HTTP.method(req) == "POST"
-        try
-            model_path = TrainedModel.load_trained_model()
-            return HTTP.Response(200, ["Content-Type" => "application/json"],
-                body=to_json(Dict("loaded" => true, "model" => "Llama-3.2-1B-Instruct-LoRA")))
-        catch e
-            return HTTP.Response(500, ["Content-Type" => "application/json"],
-                body=to_json(Dict("error" => string(e))))
-        end
-
-    elseif target == "/api/trained/status" && HTTP.method(req) == "GET"
-        info = TrainedModel.get_model_info()
-        return HTTP.Response(200, ["Content-Type" => "application/json"], body=to_json(info))
-
     elseif target == "/"
         return HTTP.Response(200, ["Content-Type" => "text/html"], body=HTML_UI)
     else
         return HTTP.Response(404, "Not found")
     end
+end
+
+function handle_chat(req::HTTP.Request)::HTTP.Response
+    input = ""
+    try
+        body = String(req.body)
+        isempty(body) || (input = get(JSON.parse(body), "message", "") |> string)
+    catch e
+        return HTTP.Response(400, ["Content-Type" => "application/json"],
+            body=to_json(Dict("error" => "invalid JSON body: $(e)")))
+    end
+    if isempty(input)
+        return HTTP.Response(400, ["Content-Type" => "application/json"],
+            body=to_json(Dict("error" => "missing 'message' field")))
+    end
+    chat_response = chat(input)
+    return HTTP.Response(200, ["Content-Type" => "application/json"], body=to_json(chat_response))
 end
 
 const HTML_UI = """

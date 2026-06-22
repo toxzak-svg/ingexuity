@@ -104,6 +104,7 @@ function chat_llama(
     n_gpu_layers::Int=0,
     n_threads::Int=4,
     max_tokens::Int=256,
+    ctx_size::Int=2048,
     session_id::Int64=0
 )::Dict{String, Any}
     if model_path === nothing
@@ -119,7 +120,8 @@ function chat_llama(
             prompt=prompt,
             n_gpu_layers=n_gpu_layers,
             nthreads=n_threads,
-            max_tokens=max_tokens
+            ctx_size=ctx_size,
+            args=`-n $(max_tokens) --temp 0.7 --top-p 0.9`
         )
 
         return Dict(
@@ -190,6 +192,35 @@ function get_training_output_path()::Union{String, Nothing}
     end
 
     return nothing
+end
+
+"""
+    warmup(; n_threads::Int=4)
+
+Pre-load the model weights into llama.cpp's memory by running a tiny inference.
+Use this at server startup so the first user-facing request doesn't pay the
+~5-15s cold-load cost.
+"""
+function warmup(; n_threads::Int=4)
+    if !is_loaded()
+        @warn "Cannot warm up: no model loaded. Call load_llama_model() first."
+        return false
+    end
+    try
+        run_llama(
+            model=MODEL_PATH[],
+            prompt="hi",
+            nthreads=n_threads,
+            n_gpu_layers=0,
+            ctx_size=512,
+            args=`-n 1`
+        )
+        @info "Model warmup complete"
+        return true
+    catch e
+        @warn "Warmup failed: $e"
+        return false
+    end
 end
 
 """

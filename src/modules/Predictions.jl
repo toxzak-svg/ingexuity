@@ -7,6 +7,7 @@ module Predictions
 using Dates
 using ..Types: Prediction, PredictionState, Intelligence,
                UserModel as UserModelType, InternalEmotional as InternalEmotionalType
+using ..SandboxSim: validate_batch
 
 export predict, update_from_outcome!, predict_with_retry
 
@@ -134,7 +135,7 @@ function predict_with_retry(user_model, internal_emotional, precog_preds, sandbo
         predictions = predict(user_model, internal_emotional, precog_preds, sandbox_results; context=context)
 
         if !isempty(predictions)
-            validated = SandboxSim.validate_batch(predictions, user_model, internal_emotional)
+            validated = validate_batch(predictions, user_model, internal_emotional)
             surviving = filter(p -> p.confidence > 0.4, predictions)
 
             if !isempty(surviving)

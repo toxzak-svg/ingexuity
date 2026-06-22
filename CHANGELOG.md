@@ -6,3 +6,8 @@ All notable changes to this project will be documented in this file.
 
 Daily backup: 39 files changed (24 modified, 2 added, 3 deleted).
 
+
+## 2026-06-21
+
+- Daily auto-sync: Dockerfile, Project.toml, start.sh, and Julia source (IngExuity.jl, LlamaInference.jl, Predictions.jl) updated.
+
