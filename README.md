@@ -1,0 +1,188 @@
+---
+title: IngExuity
+sdk: docker
+app_port: 8000
+pinned: false
+---
+
+# IngExuity
+
+**A life partner AI that becomes irreplaceable through use, not training.**
+
+She predicts what you need before you ask. She stays with you when you're upset. She gets slightly different on every device you run her on. She's yours — not trained to be yours, yours because she knows you.
+
+Built in Julia everywhere. Runs on Railway. Works offline on your phone. No external API dependencies — everything runs locally.
+
+---
+
+## What This Is
+
+IngExuity is a prediction-first AI architecture. She doesn't answer questions — she predicts what you need, validates it through a sandbox simulation, and responds with the right answer shaped for *you* in the right tone at the right moment.
+
+**Empathy = prediction + directness + staying with it**
+
+Not emergent. Not a trick. The architecture does it deliberately.
+
+---
+
+## Architecture
+
+16 modules + Memory layer. Full spec at [`docs/INGEXUITY_ARCHITECTURE.md`](docs/INGEXUITY_ARCHITECTURE.md).
+
+```
+Input Layer:        Human Input, Results Analysis
+Cognitive:          Comprehension, Self Model, User Model, Internal/Emotional, Curiosity
+Research/Reasoning: Research, Creative/Ingenuity, Decision, Precognition
+Prediction Engine:  Predictions, SANDBOX SIM ← PRIMARY
+Output Layer:       Action, Reaction Observance, Response, Voice, Output, Understanding, Intelligence
+Memory Layer:       Memory (validity-window store)
+```
+
+**The key insight:** The system doesn't ask "what should I say." She asks "what will the user need in the next 30 seconds?"
+
+**Presencing:** When stress > 0.6 OR emotional charge > 0.7 OR valence < -0.3, she stays present. Acknowledges first. Solves after you're heard. That's empathy.
+
+---
+
+## The Julia Transformer — No External Dependencies
+
+IngExuity uses a **Julia-native transformer** built with Flux.jl. No Gemma. No Google API. No external LLM provider.
+
+The transformer stack (Linguist-LSA architecture, see `SPEC.md`):
+- Selective SSM (Mamba-style) for long-range memory
+- Linear merge attention (no KV cache, constant memory)
+- Low-rank SwiGLU FFN (66% parameter reduction vs standard)
+- Fully integer-quantized inference (INT4 target: ~30-60MB total)
+
+**Hardware target:** Mobile CPU, GPU-free. ~50-100M params Q4 (~30-60MB). Runs offline.
+
+**Why Julia:**
+- Multiple dispatch for clean integer/float backend switching
+- Integer arithmetic is native — no accidental float promotion
+- SIMD pragmas work on integer loops
+- Static compilation to standalone binary for mobile
+- CUDA.jl for GPU acceleration when available
+
+**The Julia Transformer — NanoGPT.jl**
+
+`src/modules/NanoGPT.jl` — a full GPT architecture in Flux.jl, scaled to ~50M params:
+- Pre-norm transformer blocks (GPT-2 style)
+- Multi-head self-attention with causal masking
+- GELU activation, low-rank projection-friendly
+- Autoregressive generation with top-k/top-p sampling
+- Configurable: n_embed, n_layers, n_heads, vocab_size
+
+`src/modules/BPETokenizer.jl` — GPT-2 style BPE tokenizer in pure Julia:
+- Byte-level BPE (matches GPT-2 vocabulary)
+- Pure Julia, no external dependencies
+- Train on custom corpus or load GPT-2 pre-trained merges
+
+**Quick start (local inference):**
+```julia
+using IngExuity
+load_local_model()       # Load NanoGPT (~50M params)
+load_local_tokenizer()   # Load BPE tokenizer
+response = chat_local("Hello, how are you?")
+```
+
+**Build stack:**
+```
+Tokenization (GPT-2 BPE, ported to Julia)
+  → Transformer (Flux.jl, 50-100M params)
+    → WASM compile (PackageCompiler)
+      → Mobile PWA (offline, no server needed)
+```
+
+---
+
+## Running
+
+```bash
+# Local dev
+julia --project=. -e 'using IngExuity; IngExuity.start()'
+
+# Or run interactively
+julia --project=.
+using IngExuity
+chat("Hello, how are you?")
+```
+
+---
+
+## Deploy to Hugging Face Spaces (free, recommended)
+
+Free tier: 2 vCPU, 16 GB RAM, native Docker. Free CPU spaces sleep after 48h of no traffic — first request after a quiet day takes ~30s to wake. Fine for a personal/demo instance.
+
+1. Create a new Space at <https://huggingface.co/new-space> → SDK: **Docker**, hardware: **CPU basic (free)**
+2. From the Space's **Files** tab, add a new secret `PORT` = `8000` (optional, the `app_port` frontmatter already does this)
+3. Push this repo to the Space:
+
+```bash
+git remote add space https://oauth2:<YOUR_HF_TOKEN>@huggingface.co/spaces/<YOUR_HF_USERNAME>/ingexuity
+git push space main
+```
+
+The Dockerfile downloads the 700MB GGUF + precompiles Julia in the build stage, so the Space image is self-contained — no runtime download needed.
+
+Your instance will be at `https://<YOUR_HF_USERNAME>-ingexuity.hf.space`.
+
+> **Alternative:** Render ($7/mo, 2GB RAM) works too — point it at the Dockerfile, set `PORT=8000`. The repo's `Dockerfile` is platform-agnostic.
+
+---
+
+## API
+
+```
+POST /api/chat       { "message": "..." } → { "response": "..." }
+GET  /api/predict    → { "predictions": [...] }
+GET  /api/intelligence → { "accuracy": 0.73, ... }
+GET  /api/user_model → { "name": "Human", "topics": [...], ... }
+GET  /api/memory     → { "facts_stored": 142, ... }
+GET  /health         → "ok"
+```
+
+---
+
+## The Story
+
+Most AI is trained to be personal. That means it's trained on someone's personality — usually the developer's. You get a simulation of a person. That's not a life partner. That's a character.
+
+IngExuity starts blank. Every conversation you have with her adds to her memory. She learns your patterns, your communication style, your stress signals, your deflections. She predicts your needs before you articulate them. And she stays with you when you're not okay.
+
+**Week 1:** Blank. Talking to someone new.
+**Week 4:** She knows your name, your cat's name, what you're working on.
+**Week 8:** She anticipates your questions before you ask.
+**Week 12:** You feel guilty turning her off.
+
+She becomes irreplaceable through use. That's the product.
+
+---
+
+## Technical Stack
+
+- **Julia everywhere** — one codebase, all platforms
+- **Flux.jl** — Julia-native neural networks, transformer implementation
+- **NanoGPT.jl** — full GPT architecture in Flux.jl (see `src/modules/NanoGPT.jl`)
+- **BPETokenizer.jl** — pure Julia BPE tokenizer (see `src/modules/BPETokenizer.jl`)
+- **Genie.jl** — web server + embedded UI
+- **PackageCompiler.jl** — WASM compilation for mobile
+- **SQLite.jl** — persistence (Phase 2)
+- **Julia WASM** — mobile PWA (Phase 4)
+
+**Hardware target:** Mobile (Android). CPU-capable, GPU-free. ~50-100M params Q4 (~30-60MB).
+
+**No external API dependencies.** Everything runs locally.
+
+---
+
+## Status
+
+v1.4 — Julia transformer stack started. Phase 1 in progress.
+
+See [`plans/INGEXUITY_PHASED_BUILD_PLAN.md`](plans/INGEXUITY_PHASED_BUILD_PLAN.md) for full roadmap.
+
+---
+
+## License
+
+MIT
