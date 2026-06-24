@@ -1,0 +1,27 @@
+# Data and extracted outputs
+data/
+*.zip
+*.jsonl.bak
+*.jsonl
+# IDE
+.vscode/
+
+# Extraction scripts (not part of the core project)
+build_raw_dataset.py
+convert_dataset.py
+debug_session.py
+extract_clean.py
+extract_fast.py
+extract_sessions.py
+extract_v3.py
+extract_v4.py
+extract_v5.py
+extract_v6.py
+
+temp_base_model/model.safetensors
+temp_merged_model/
+models/gpt2_124m.bin
+models/gpt2_124m.*
+*.bin
+models/*.safetensors
+temp_*_model/*.safetensors

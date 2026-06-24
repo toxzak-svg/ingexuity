@@ -1,0 +1,81 @@
+# ============================================================================
+# LoRA Configuration for Llama 3.2 Fine-tuning
+# ============================================================================
+# This file defines the LoRA adapter configuration used by train_llama.py
+# ============================================================================
+
+lora_config:
+  # LoRA rank - higher = more capacity, more VRAM needed
+  # 32 is good balance for 1B model on 16GB GPU
+  rank: 32
+  
+  # LoRA alpha - typically 2x rank
+  alpha: 64
+  
+  # Dropout for LoRA layers
+  dropout: 0.05
+  
+  # Target modules for LoRA injection
+  # These are the attention and FFN layers in Llama 3.2
+  target_modules:
+    - q_proj   # Query projection in attention
+    - k_proj   # Key projection in attention
+    - v_proj   # Value projection in attention
+    - o_proj   # Output projection in attention
+    - gate_proj # SwiGLU gate
+    - up_proj   # SwiGLU up
+    - down_proj # SwiGLU down
+
+training:
+  # Batch size per device
+  # 4 is safe for P100 (16GB) with 4-bit quantization
+  batch_size: 4
+  
+  # Gradient accumulation steps
+  # Effective batch = batch_size * gradient_accumulation_steps
+  # 4 * 8 = 32 tokens per step
+  gradient_accumulation_steps: 8
+  
+  # Learning rate
+  learning_rate: 0.0002
+  
+  # Number of epochs
+  num_epochs: 3
+  
+  # Warmup steps (100 is good for most datasets)
+  warmup_steps: 100
+  
+  # Maximum sequence length
+  max_seq_length: 512
+  
+  # Weight decay
+  weight_decay: 0.01
+  
+  # Gradient clipping
+  grad_clip: 1.0
+
+optimization:
+  # Use Flash Attention 2 for better performance
+  use_flash_attention: true
+  
+  # Use gradient checkpointing to save VRAM
+  use_gradient_checkpointing: true
+  
+  # Mixed precision (FP16)
+  mixed_precision: true
+  
+  # Use 4-bit quantization (QLoRA)
+  use_4bit_quantization: true
+
+output:
+  # Output directory for checkpoints
+  output_dir: "./llama3_finetuned"
+  
+  # Save checkpoint every N steps
+  save_steps: 100
+  
+  # Log every N steps
+  logging_steps: 10
+  
+  # Keep only last N checkpoints
+  save_total_limit: 3

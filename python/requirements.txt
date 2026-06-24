@@ -1,0 +1,38 @@
+# Python dependencies for IngExuity
+# Install with: pip install -r python/requirements.txt
+
+# ---------------------------------------------------------------------------
+# Core inference
+# ---------------------------------------------------------------------------
+transformers>=4.50.0
+torch>=2.0.0
+accelerate>=0.20.0
+numpy>=1.24.0
+
+# ---------------------------------------------------------------------------
+# LoRA fine-tuning
+# ---------------------------------------------------------------------------
+peft>=0.13.0          # LoRA, QLoRA support
+bitsandbytes>=0.44.0  # 4-bit quantization for memory efficiency
+
+# ---------------------------------------------------------------------------
+# Training utilities
+# ---------------------------------------------------------------------------
+datasets>=2.20.0      # Dataset loading and preprocessing
+torchvision>=0.15.0    # Optional, for vision components
+
+# ---------------------------------------------------------------------------
+# GGUF conversion (for llama.cpp integration)
+# ---------------------------------------------------------------------------
+llama-cpp-python>=0.2.0  # GGUF export and llama.cpp bindings
+
+# ---------------------------------------------------------------------------
+# Optional: For speech generation
+# ---------------------------------------------------------------------------
+# TTS>=0.15.0
+
+# ---------------------------------------------------------------------------
+# Cloud GPU platforms specific
+# ---------------------------------------------------------------------------
+# Kaggle: pip install kaggle
+# Paperspace: No extra deps needed (standard torch works)
