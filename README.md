@@ -1,172 +1,115 @@
-# IngExuity
+# IngExuity — Julia Everywhere
 
-**A life partner AI that becomes irreplaceable through use, not training.**
+IngExuity is a local-first companion-AI research project built around explicit user modeling, durable memory, presencing, and falsifiable prediction.
 
-She predicts what you need before you ask. She stays with you when you're upset. She gets slightly different on every device you run her on. She's yours — not trained to be yours, yours because she knows you.
+This branch is the **Julia-native implementation line**. The Rust implementation remains on `main`; Julia development is isolated on `julia-main` and feature branches based on it.
 
-Built in Julia everywhere. Runs on Railway. Works offline on your phone. No external API dependencies — everything runs locally.
+> Current status: executable research prototype. The modular cognitive pipeline and GGUF adapter exist. The Julia-native transformer and tokenizers are experimental and are not yet trained, benchmarked, or safe to advertise as a production language model.
 
----
+## Why keep a Julia implementation?
 
-## What This Is
+The Julia line is not a syntax port of the Rust service. It exists to test ideas that benefit from Julia’s numerical and dispatch model:
 
-IngExuity is a prediction-first AI architecture. She doesn't answer questions — she predicts what you need, validates it through a sandbox simulation, and responds with the right answer shaped for *you* in the right tone at the right moment.
+- multiple-dispatch policy and backend composition;
+- generic floating-point and integer kernels;
+- direct experimentation with attention, state-space, and quantized operators;
+- one-language model, cognition, evaluation, and application research;
+- inspectable model internals without a mandatory Python training runtime.
 
-**Empathy = prediction + directness + staying with it**
+These are hypotheses to test, not automatic advantages. Every claimed benefit must be demonstrated by tests or benchmarks.
 
-Not emergent. Not a trick. The architecture does it deliberately.
+## What is currently in the repository
 
----
+| Component | Status | Notes |
+|---|---|---|
+| Cognitive module pipeline | active prototype | Comprehension, user/self models, emotional state, predictions, SANDBOX SIM, response policy |
+| Presencing policy | active prototype | Chooses acknowledgment before problem-solving from explicit state thresholds |
+| LlamaCpp/GGUF adapter | active but optional | Local external model artifact; not Julia-native model execution |
+| `NanoGPT.jl` | experimental | Handwritten Julia transformer; random weights by default |
+| `BPETokenizer.jl` | experimental | Pure-Julia tokenizer research; requires conformance work |
+| Linguist-LSA | research specification | Selective SSM, linear-merge attention, low-rank FFN concepts |
+| Memory | prototype | Process-local validity-window store; not durable yet |
+| HTTP service | prototype | Current API is useful for development, not public multi-tenant hosting |
+| Mobile/WASM | unproven research | No production mobile artifact exists yet |
 
-## Architecture
+## Architectural rule
 
-16 modules + Memory layer. Full spec at [`docs/INGEXUITY_ARCHITECTURE.md`](docs/INGEXUITY_ARCHITECTURE.md).
+The defining question is:
 
-```
-Input Layer:        Human Input, Results Analysis
-Cognitive:          Comprehension, Self Model, User Model, Internal/Emotional, Curiosity
-Research/Reasoning: Research, Creative/Ingenuity, Decision, Precognition
-Prediction Engine:  Predictions, SANDBOX SIM ← PRIMARY
-Output Layer:       Action, Reaction Observance, Response, Voice, Output, Understanding, Intelligence
-Memory Layer:       Memory (validity-window store)
-```
+> What is the user likely to need next, and what later observation could prove that prediction wrong?
 
-**The key insight:** The system doesn't ask "what should I say." She asks "what will the user need in the next 30 seconds?"
+A response is not evidence that a prediction was correct. Prediction issuance, intervention selection, outcome observation, and scoring must remain separate operations.
 
-**Presencing:** When stress > 0.6 OR emotional charge > 0.7 OR valence < -0.3, she stays present. Acknowledges first. Solves after you're heard. That's empathy.
+## Current request path
 
----
-
-## The Julia Transformer — No External Dependencies
-
-IngExuity uses a **Julia-native transformer** built with Flux.jl. No Gemma. No Google API. No external LLM provider.
-
-The transformer stack (Linguist-LSA architecture, see `SPEC.md`):
-- Selective SSM (Mamba-style) for long-range memory
-- Linear merge attention (no KV cache, constant memory)
-- Low-rank SwiGLU FFN (66% parameter reduction vs standard)
-- Fully integer-quantized inference (INT4 target: ~30-60MB total)
-
-**Hardware target:** Mobile CPU, GPU-free. ~50-100M params Q4 (~30-60MB). Runs offline.
-
-**Why Julia:**
-- Multiple dispatch for clean integer/float backend switching
-- Integer arithmetic is native — no accidental float promotion
-- SIMD pragmas work on integer loops
-- Static compilation to standalone binary for mobile
-- CUDA.jl for GPU acceleration when available
-
-**The Julia Transformer — NanoGPT.jl**
-
-`src/modules/NanoGPT.jl` — a full GPT architecture in Flux.jl, scaled to ~50M params:
-- Pre-norm transformer blocks (GPT-2 style)
-- Multi-head self-attention with causal masking
-- GELU activation, low-rank projection-friendly
-- Autoregressive generation with top-k/top-p sampling
-- Configurable: n_embed, n_layers, n_heads, vocab_size
-
-`src/modules/BPETokenizer.jl` — GPT-2 style BPE tokenizer in pure Julia:
-- Byte-level BPE (matches GPT-2 vocabulary)
-- Pure Julia, no external dependencies
-- Train on custom corpus or load GPT-2 pre-trained merges
-
-**Quick start (local inference):**
-```julia
-using IngExuity
-load_local_model()       # Load NanoGPT (~50M params)
-load_local_tokenizer()   # Load BPE tokenizer
-response = chat_local("Hello, how are you?")
+```text
+input
+  -> comprehension
+  -> user/self/emotional state updates
+  -> presencing gate
+  -> candidate predictions
+  -> SANDBOX SIM policy filtering
+  -> action and response policy
+  -> reaction observation
+  -> delayed outcome evaluation
+  -> memory and state update
 ```
 
-**Build stack:**
-```
-Tokenization (GPT-2 BPE, ported to Julia)
-  → Transformer (Flux.jl, 50-100M params)
-    → WASM compile (PackageCompiler)
-      → Mobile PWA (offline, no server needed)
-```
+The existing implementation does not yet satisfy every boundary in that diagram. Phase 0 records the gaps and establishes tests before behavior is expanded.
 
----
+## Run the Julia package
 
-## Running
+Install Julia 1.12, then:
 
 ```bash
-# Local dev
+julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.test()'
+```
+
+Start the development server:
+
+```bash
 julia --project=. -e 'using IngExuity; IngExuity.start()'
-
-# Or run interactively
-julia --project=.
-using IngExuity
-chat("Hello, how are you?")
 ```
 
----
+The GGUF backend is optional. Tests and the Julia-native model smoke harness must run without downloading a model.
 
-## Deploy to Railway
+## Julia-native model work
 
-One click. Seriously.
+The repository contains two distinct model directions:
 
-1. Fork this repo
-2. Connect to Railway
-3. It auto-detects the Dockerfile
-4. Click deploy
+1. **NanoGPT baseline** — a small, understandable transformer used to validate tensor layouts, tokenization, deterministic initialization, and generation mechanics.
+2. **Linguist-LSA research** — selective state-space memory, linear-merge attention, low-rank feed-forward layers, and integer-oriented inference.
 
-Your IngExuity instance at `https://your-app.railway.dev/`
+The NanoGPT baseline is not the product architecture. It is the control condition against which new Julia-native operators must be measured.
 
----
+Minimum evidence required before calling a Julia-native backend usable:
 
-## API
+- deterministic forward-pass tests;
+- tokenizer round-trip and reference conformance tests;
+- trained checkpoint provenance;
+- held-out loss and generation evaluation;
+- memory and latency measurements on target hardware;
+- comparison against a conventional local GGUF baseline;
+- failure and numerical-stability tests.
 
-```
-POST /api/chat       { "message": "..." } → { "response": "..." }
-GET  /api/predict    → { "predictions": [...] }
-GET  /api/intelligence → { "accuracy": 0.73, ... }
-GET  /api/user_model → { "name": "Human", "topics": [...], ... }
-GET  /api/memory     → { "facts_stored": 142, ... }
-GET  /health         → "ok"
-```
+## Branch structure
 
----
+- `main` — Rust implementation line
+- `julia-main` — stable Julia implementation line
+- `julia-everywhere/*` — Julia feature and research branches
 
-## The Story
+Changes should not be merged between the two implementation lines merely to claim parity. Shared concepts should be specified through fixtures and behavioral contracts.
 
-Most AI is trained to be personal. That means it's trained on someone's personality — usually the developer's. You get a simulation of a person. That's not a life partner. That's a character.
+## Plans and documentation
 
-IngExuity starts blank. Every conversation you have with her adds to her memory. She learns your patterns, your communication style, your stress signals, your deflections. She predicts your needs before you articulate them. And she stays with you when you're not okay.
+- [Julia-everywhere phased build plan](plans/INGEXUITY_PHASED_BUILD_PLAN.md)
+- [Julia-everywhere architecture](docs/JULIA_EVERYWHERE_ARCHITECTURE.md)
+- [Original cognitive architecture](docs/INGEXUITY_ARCHITECTURE.md)
+- [Model research specification](SPEC.md)
 
-**Week 1:** Blank. Talking to someone new.
-**Week 4:** She knows your name, your cat's name, what you're working on.
-**Week 8:** She anticipates your questions before you ask.
-**Week 12:** You feel guilty turning her off.
+## Safety and product boundaries
 
-She becomes irreplaceable through use. That's the product.
-
----
-
-## Technical Stack
-
-- **Julia everywhere** — one codebase, all platforms
-- **Flux.jl** — Julia-native neural networks, transformer implementation
-- **NanoGPT.jl** — full GPT architecture in Flux.jl (see `src/modules/NanoGPT.jl`)
-- **BPETokenizer.jl** — pure Julia BPE tokenizer (see `src/modules/BPETokenizer.jl`)
-- **Genie.jl** — web server + embedded UI
-- **PackageCompiler.jl** — WASM compilation for mobile
-- **SQLite.jl** — persistence (Phase 2)
-- **Julia WASM** — mobile PWA (Phase 4)
-
-**Hardware target:** Mobile (Android). CPU-capable, GPU-free. ~50-100M params Q4 (~30-60MB).
-
-**No external API dependencies.** Everything runs locally.
-
----
-
-## Status
-
-v1.4 — Julia transformer stack started. Phase 1 in progress.
-
-See [`plans/INGEXUITY_PHASED_BUILD_PLAN.md`](plans/INGEXUITY_PHASED_BUILD_PLAN.md) for full roadmap.
-
----
+IngExuity must not optimize for guilt, dependency, exclusivity, or replacing human relationships. The research target is useful longitudinal personalization with user control, correction, deletion, and calibrated uncertainty.
 
 ## License
 
