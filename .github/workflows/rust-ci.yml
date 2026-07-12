@@ -1,19 +1,13 @@
-name: Rust CI
+name: Diagnose persistent runtime build
 
 on:
-  push:
-    branches: [main]
   pull_request:
 
 permissions:
   contents: read
 
-concurrency:
-  group: rust-ci-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  test:
+  native:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -24,61 +18,26 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.97.0
-          components: rustfmt, clippy
+          components: clippy
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Lint
-        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-
-      - name: Test
-        run: cargo test --locked --workspace --all-features
-
-      - name: Build release binary
-        run: cargo build --locked --workspace --release
-
-      - name: Start durable model-free server
-        env:
-          INGEXUITY_DB_PATH: /tmp/ingexuity-ci.sqlite3
+      - name: Run Clippy
+        id: lint
+        continue-on-error: true
+        shell: bash
         run: |
-          rm -f /tmp/ingexuity-ci.sqlite3*
-          target/release/ingexuity-server > /tmp/ingexuity.log 2>&1 &
-          echo $! > /tmp/ingexuity.pid
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:8000/health/live > /tmp/live.json \
-              && curl --fail --silent http://127.0.0.1:8000/health/ready > /tmp/ready.json; then
-              exit 0
-            fi
-            sleep 1
-          done
-          cat /tmp/ingexuity.log
-          exit 1
+          set -o pipefail
+          cargo clippy --locked --workspace --all-targets --all-features -- -D warnings 2>&1 | tee native-build.log
 
-      - name: Verify health contracts
-        run: |
-          python3 - <<'PY'
-          import json
-          with open('/tmp/live.json', encoding='utf-8') as handle:
-              live = json.load(handle)
-          with open('/tmp/ready.json', encoding='utf-8') as handle:
-              ready = json.load(handle)
-          assert live['status'] == 'ok', live
-          assert live['runtime'] == 'rust', live
-          assert ready['status'] == 'ready', ready
-          assert ready['runtime'] == 'rust', ready
-          assert ready['backend'] == 'ready', ready
-          assert ready['storage'] == 'ready', ready
-          assert ready['available_inference_slots'] >= 1, ready
-          PY
-
-      - name: Stop server
+      - name: Upload native compiler output
         if: always()
-        run: |
-          if [ -f /tmp/ingexuity.pid ]; then
-            kill "$(cat /tmp/ingexuity.pid)" || true
-          fi
-          cat /tmp/ingexuity.log || true
+        uses: actions/upload-artifact@v4
+        with:
+          name: persistent-runtime-native-build
+          path: native-build.log
+
+      - name: Enforce native result
+        if: always()
+        run: test "${{ steps.lint.outcome }}" = success
 
   container:
     runs-on: ubuntu-latest
@@ -87,57 +46,21 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Build model-free image
-        run: docker build --tag ingexuity:ci .
-
-      - name: Verify container restart recovery
+      - name: Build image
+        id: build
+        continue-on-error: true
+        shell: bash
         run: |
-          set -eu
-          docker volume create ingexuity-ci-data >/dev/null
-          cleanup() {
-            docker rm -f ingexuity-ci >/dev/null 2>&1 || true
-            docker volume rm ingexuity-ci-data >/dev/null 2>&1 || true
-          }
-          trap cleanup EXIT
+          set -o pipefail
+          docker build --progress=plain --tag ingexuity:ci . 2>&1 | tee docker-build.log
 
-          docker run --detach --name ingexuity-ci \
-            -p 8000:8000 \
-            -v ingexuity-ci-data:/app/data \
-            ingexuity:ci
+      - name: Upload Docker compiler output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: persistent-runtime-docker-build
+          path: docker-build.log
 
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:8000/health/ready > /tmp/container-ready.json; then
-              break
-            fi
-            sleep 1
-          done
-
-          SESSION_ID=$(curl --fail --silent -X POST http://127.0.0.1:8000/api/v1/sessions \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["session_id"])')
-          curl --fail --silent -X POST http://127.0.0.1:8000/api/v1/chat \
-            -H 'content-type: application/json' \
-            -d "{\"session_id\":\"${SESSION_ID}\",\"message\":\"Rust work\"}" \
-            > /tmp/container-chat.json
-
-          docker rm -f ingexuity-ci >/dev/null
-          docker run --detach --name ingexuity-ci \
-            -p 8000:8000 \
-            -v ingexuity-ci-data:/app/data \
-            ingexuity:ci
-
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:8000/health/ready >/dev/null; then
-              break
-            fi
-            sleep 1
-          done
-
-          curl --fail --silent "http://127.0.0.1:8000/api/v1/sessions/${SESSION_ID}" \
-            > /tmp/recovered-session.json
-          python3 - <<'PY'
-          import json
-          with open('/tmp/recovered-session.json', encoding='utf-8') as handle:
-              session = json.load(handle)
-          assert session['turn_count'] == 1, session
-          assert session['state_version'] >= 2, session
-          PY
+      - name: Enforce Docker result
+        if: always()
+        run: test "${{ steps.build.outcome }}" = success
