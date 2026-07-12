@@ -1,47 +1,143 @@
-name: Apply version-overflow mapping
+name: Rust CI
 
 on:
+  push:
+    branches: [main]
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: rust-ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  fix:
+  test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - name: Check out pull request head
+      - name: Check out repository
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.ref }}
 
       - name: Install Rust 1.97
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.97.0
-          components: rustfmt
+          components: rustfmt, clippy
 
-      - name: Insert explicit API mapping
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --locked --workspace --all-features
+
+      - name: Build release binary
+        run: cargo build --locked --workspace --release
+
+      - name: Start durable model-free server
+        env:
+          INGEXUITY_DB_PATH: /tmp/ingexuity-ci.sqlite3
+        run: |
+          rm -f /tmp/ingexuity-ci.sqlite3*
+          target/release/ingexuity-server > /tmp/ingexuity.log 2>&1 &
+          echo $! > /tmp/ingexuity.pid
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8000/health/live > /tmp/live.json \
+              && curl --fail --silent http://127.0.0.1:8000/health/ready > /tmp/ready.json; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/ingexuity.log
+          exit 1
+
+      - name: Verify health contracts
         run: |
           python3 - <<'PY'
-          from pathlib import Path
-          path = Path('crates/ingexuity-server/src/lib.rs')
-          source = path.read_text(encoding='utf-8')
-          anchor = '            Self::Core(CoreError::Inference(_)) => {'
-          inserted = '''            Self::Core(CoreError::VersionOverflow) => {
-              (StatusCode::INTERNAL_SERVER_ERROR, "state_version_overflow")
-          }
-'''
-          if source.count(anchor) != 1:
-              raise SystemExit(f'inference arm count: {source.count(anchor)}')
-          path.write_text(source.replace(anchor, inserted + anchor, 1), encoding='utf-8')
+          import json
+          with open('/tmp/live.json', encoding='utf-8') as handle:
+              live = json.load(handle)
+          with open('/tmp/ready.json', encoding='utf-8') as handle:
+              ready = json.load(handle)
+          assert live['status'] == 'ok', live
+          assert live['runtime'] == 'rust', live
+          assert ready['status'] == 'ready', ready
+          assert ready['runtime'] == 'rust', ready
+          assert ready['backend'] == 'ready', ready
+          assert ready['storage'] == 'ready', ready
+          assert ready['available_inference_slots'] >= 1, ready
           PY
-          cargo fmt --all
 
-      - name: Commit fix
+      - name: Stop server
+        if: always()
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add crates/ingexuity-server/src/lib.rs
-          git commit -m "fix(server): map state version overflow explicitly"
-          git push origin HEAD:${{ github.event.pull_request.head.ref }}
+          if [ -f /tmp/ingexuity.pid ]; then
+            kill "$(cat /tmp/ingexuity.pid)" || true
+          fi
+          cat /tmp/ingexuity.log || true
+
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build model-free image
+        run: docker build --tag ingexuity:ci .
+
+      - name: Verify container restart recovery
+        run: |
+          set -eu
+          docker volume create ingexuity-ci-data >/dev/null
+          cleanup() {
+            docker rm -f ingexuity-ci >/dev/null 2>&1 || true
+            docker volume rm ingexuity-ci-data >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          docker run --detach --name ingexuity-ci \
+            -p 8000:8000 \
+            -v ingexuity-ci-data:/app/data \
+            ingexuity:ci
+
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8000/health/ready > /tmp/container-ready.json; then
+              break
+            fi
+            sleep 1
+          done
+
+          SESSION_ID=$(curl --fail --silent -X POST http://127.0.0.1:8000/api/v1/sessions \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["session_id"])')
+          curl --fail --silent -X POST http://127.0.0.1:8000/api/v1/chat \
+            -H 'content-type: application/json' \
+            -d "{\"session_id\":\"${SESSION_ID}\",\"message\":\"Rust work\"}" \
+            > /tmp/container-chat.json
+
+          docker rm -f ingexuity-ci >/dev/null
+          docker run --detach --name ingexuity-ci \
+            -p 8000:8000 \
+            -v ingexuity-ci-data:/app/data \
+            ingexuity:ci
+
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8000/health/ready >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+
+          curl --fail --silent "http://127.0.0.1:8000/api/v1/sessions/${SESSION_ID}" \
+            > /tmp/recovered-session.json
+          python3 - <<'PY'
+          import json
+          with open('/tmp/recovered-session.json', encoding='utf-8') as handle:
+              session = json.load(handle)
+          assert session['turn_count'] == 1, session
+          assert session['state_version'] >= 2, session
+          PY
