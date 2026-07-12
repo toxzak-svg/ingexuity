@@ -11,32 +11,7 @@ use std::{
 use thiserror::Error;
 use uuid::Uuid;
 
-const MIGRATIONS: &[(u32, &str)] = &[(
-    1,
-    r#"
-    CREATE TABLE sessions (
-        session_id      TEXT PRIMARY KEY NOT NULL,
-        version         INTEGER NOT NULL CHECK (version >= 0),
-        snapshot_json   TEXT NOT NULL,
-        created_at_ms   INTEGER NOT NULL CHECK (created_at_ms >= 0),
-        updated_at_ms   INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms)
-    );
-
-    CREATE TABLE events (
-        session_id      TEXT NOT NULL,
-        sequence        INTEGER NOT NULL CHECK (sequence > 0),
-        event_id        TEXT NOT NULL UNIQUE,
-        event_type      TEXT NOT NULL CHECK (length(event_type) > 0),
-        payload_json    TEXT NOT NULL,
-        occurred_at_ms  INTEGER NOT NULL CHECK (occurred_at_ms >= 0),
-        PRIMARY KEY (session_id, sequence),
-        FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
-    );
-
-    CREATE INDEX events_by_session_time
-        ON events(session_id, occurred_at_ms, sequence);
-    "#,
-)];
+const MIGRATIONS: &[(u32, &str)] = &[(1, include_str!("../../../migrations/0001_event_store.sql"))];
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -44,6 +19,8 @@ pub enum StoreError {
     Sqlite(#[from] rusqlite::Error),
     #[error("state serialization failed: {0}")]
     Serialization(#[from] serde_json::Error),
+    #[error("stored UUID is invalid: {0}")]
+    InvalidUuid(#[from] uuid::Error),
     #[error("store mutex was poisoned")]
     Poisoned,
     #[error("session {0} does not exist")]
@@ -58,6 +35,13 @@ pub enum StoreError {
     SnapshotSessionMismatch {
         requested_id: SessionId,
         snapshot_id: SessionId,
+    },
+    #[error(
+        "stored snapshot version {snapshot_version} does not match row version {stored_version}"
+    )]
+    SnapshotVersionMismatch {
+        stored_version: u64,
+        snapshot_version: u64,
     },
     #[error("snapshot version must advance beyond {expected}, got {actual}")]
     NonAdvancingVersion { expected: u64, actual: u64 },
@@ -147,7 +131,8 @@ impl SqliteStore {
 
     pub fn quick_check(&self) -> Result<(), StoreError> {
         let connection = self.connection()?;
-        let result = connection.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))?;
+        let result =
+            connection.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))?;
         if result == "ok" {
             Ok(())
         } else {
@@ -202,9 +187,16 @@ impl SqliteStore {
                     snapshot_id: snapshot.session_id,
                 });
             }
+            let stored_version = from_i64(version)?;
+            if snapshot.version != stored_version {
+                return Err(StoreError::SnapshotVersionMismatch {
+                    stored_version,
+                    snapshot_version: snapshot.version,
+                });
+            }
             Ok(StoredSession {
                 session_id,
-                version: from_i64(version)?,
+                version: stored_version,
                 snapshot,
                 created_at_ms: from_i64(created_at_ms)?,
                 updated_at_ms: from_i64(updated_at_ms)?,
@@ -236,7 +228,10 @@ impl SqliteStore {
                 actual: new_snapshot.version,
             });
         }
-        if events.iter().any(|event| event.event_type.trim().is_empty()) {
+        if events
+            .iter()
+            .any(|event| event.event_type.trim().is_empty())
+        {
             return Err(StoreError::EmptyEventType);
         }
 
@@ -336,12 +331,7 @@ impl SqliteStore {
             events.push(StoredEvent {
                 session_id,
                 sequence: from_i64(sequence)?,
-                event_id: Uuid::parse_str(&event_id).map_err(|error| {
-                    StoreError::Serialization(serde_json::Error::io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        error,
-                    )))
-                })?,
+                event_id: Uuid::parse_str(&event_id)?,
                 event_type,
                 payload: serde_json::from_str(&payload_json)?,
                 occurred_at_ms: from_i64(occurred_at_ms)?,
@@ -378,9 +368,8 @@ fn configure_connection(connection: &Connection) -> Result<(), rusqlite::Error> 
          PRAGMA busy_timeout = 5000;
          PRAGMA synchronous = FULL;",
     )?;
-    let _journal_mode: String = connection.query_row("PRAGMA journal_mode = WAL", [], |row| {
-        row.get(0)
-    })?;
+    let _journal_mode: String =
+        connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
     Ok(())
 }
 
