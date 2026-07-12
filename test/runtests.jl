@@ -7,4 +7,5 @@ using IngExuity
 @testset "IngExuity Test Suite" begin
     include(joinpath(@__DIR__, "modules.jl"))
     include(joinpath(@__DIR__, "julia_native.jl"))
+    include(joinpath(@__DIR__, "j1_transformer.jl"))
 end
