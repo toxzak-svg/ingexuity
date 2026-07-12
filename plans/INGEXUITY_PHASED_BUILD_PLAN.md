@@ -1,365 +1,307 @@
-# IngExuity — Robust Phased Build Plan
+# IngExuity — Rust-Native Robust Build Plan
 
-**Status:** Engineering baseline and execution roadmap  
+**Status:** Accepted engineering direction  
 **Updated:** 2026-07-12  
-**Scope:** Turn the current prototype into a reliable, measurable, privacy-preserving local companion system.  
-**Product thesis:** IngExuity should become useful through accumulated interaction and explicit user modeling, not through claims that cannot be measured.
+**Production language:** Rust  
+**Legacy implementation:** Julia prototype retained temporarily as behavioral reference only  
+**Scope:** Build a reliable, measurable, privacy-preserving local companion system whose personalization and prediction claims can be falsified.
 
 ---
 
-## 1. What This Plan Changes
+## 1. Architecture Decision
 
-The earlier roadmap mixed implemented behavior, desired architecture, model research, deployment targets, and product claims into a single timeline. This plan replaces schedule-based promises with **evidence-gated phases**. A phase is complete only when its acceptance gate passes.
+IngExuity will be implemented as a Rust workspace. The current Julia code is not the production foundation. It remains available only to recover useful behaviors, test cases, and terminology while equivalent Rust components are built and verified.
 
-The current repository contains a meaningful prototype, but the implementation and documentation have drifted:
+This decision is based on the project's actual requirements:
 
-- The active runtime uses `HTTP.jl`, `JSON.jl`, and a `LlamaCpp` GGUF backend.
-- `NanoGPT.jl`, `IGSDCore.jl`, and `TrainedModel.jl` are present as experimental or disabled paths, not validated production backends.
-- Conversation and prediction state are process-global.
-- Memory is currently an in-memory vector with a default 24-hour validity window.
-- The module pipeline exists, but the direct local-model path bypasses most of it.
-- A nonempty direct-model response is currently recorded as a correct prediction, so the reported accuracy is not yet a valid measurement.
-- SANDBOX SIM primarily rechecks the same heuristic state used to generate predictions; it is not yet an independent counterfactual evaluator.
-- Module tests are substantial, but the repository lacks a complete production test matrix for persistence, concurrency, API contracts, deployment, security, and model failure modes.
+- predictable memory and concurrency semantics;
+- explicit ownership of per-user state;
+- safe local persistence;
+- small deployable binaries;
+- native desktop and mobile integration;
+- mature bindings to llama.cpp and other local runtimes;
+- strong type-level interfaces for state transitions;
+- deterministic replay and property testing;
+- long-lived schema and migration support.
 
-This is not a reason to discard the project. It identifies the correct starting point.
+The migration is not a line-for-line port. Heuristic modules are preserved only when they have a clear contract, tests, and measurable value.
+
+### Repository status vocabulary
+
+Every component must be labeled as one of:
+
+- **active** — used by the default Rust runtime and covered by CI;
+- **experimental** — runnable but not relied upon by the default product;
+- **planned** — specified but not implemented;
+- **legacy** — retained only for migration reference;
+- **deprecated** — scheduled for removal.
 
 ---
 
 ## 2. Non-Negotiable Engineering Principles
 
-1. **Repository truth before product narrative.** Documentation must distinguish active, experimental, planned, and deprecated components.
-2. **No self-confirming metrics.** Output generation cannot label its own prediction as correct merely because output was produced.
-3. **Session isolation by construction.** One user's state, memory, or inference context must never appear in another session.
-4. **Local-first does not mean security-free.** Local data still needs access control, deletion, migration, integrity checks, and a threat model.
-5. **Uncertainty is a valid result.** The system must be able to abstain, ask, or defer rather than inflate confidence.
-6. **Every adaptive mechanism needs a baseline and an ablation.** A module is useful only if removing it measurably worsens an appropriate outcome.
-7. **Safety is a system property.** Emotional interaction, memory, prediction, and response policy require explicit constraints and adverse-case tests.
-8. **Portability follows stable state semantics.** Multi-device identity cannot be reliable until state schemas, migrations, conflict rules, and provenance are defined.
-9. **Model architecture is replaceable infrastructure.** IngExuity's product value must not depend on an unvalidated custom transformer.
-10. **Claims are earned at acceptance gates.** README language must not outrun reproducible evidence.
+1. **Rust is the production substrate.** New runtime, state, API, storage, and inference integration work is written in Rust.
+2. **Repository truth before product narrative.** README claims must match measured behavior.
+3. **No self-confirming metrics.** Producing a response never counts as a correct prediction.
+4. **Session isolation by construction.** No process-global mutable user state.
+5. **State transitions are explicit.** Core functions receive state and return typed events or updates.
+6. **Uncertainty and abstention are valid outcomes.** Confidence cannot rise without evidence.
+7. **Every adaptive mechanism needs a baseline and ablation.** Modules survive by measured contribution, not naming.
+8. **Local-first still requires security.** Local data needs access control, deletion, migration, integrity checks, and a threat model.
+9. **Inference backends are replaceable infrastructure.** IngExuity must not depend on one model or custom architecture.
+10. **Safety is a system property.** Emotional adaptation, memory, prediction, and output policy require adverse-case tests.
+11. **Identity portability follows stable schemas.** Multi-device work waits for migrations, provenance, and conflict rules.
+12. **Claims are earned at acceptance gates.** A phase is complete only when its tests and evidence pass.
 
 ---
 
-## 3. Target Runtime Architecture
+## 3. Target Rust Workspace
 
 ```text
-Client
-  -> API boundary
-     -> authenticated/authorized Session ID
-        -> Session Manager
-           -> Conversation State
-           -> User Model
-           -> Memory Store
-           -> Prediction Ledger
-           -> Event Log
-        -> Turn Orchestrator
-           -> Comprehension / feature extraction
-           -> Prediction proposals
-           -> Candidate response policies
-           -> Independent policy checks
-           -> Inference backend
-           -> Output renderer
-        -> Outcome Resolver
-           -> delayed labels
-           -> calibration update
-           -> user-model update
-           -> audit event
+IngExuity/
+├── Cargo.toml
+├── Cargo.lock
+├── crates/
+│   ├── ingexuity-core/          # domain types and deterministic state transitions
+│   ├── ingexuity-server/        # Axum HTTP API and session boundary
+│   ├── ingexuity-store/         # SQLite event/state/memory persistence
+│   ├── ingexuity-inference/     # backend traits and llama.cpp adapter
+│   ├── ingexuity-eval/          # replay, baselines, scoring, calibration
+│   └── ingexuity-safety/        # policy constraints and adverse-case checks
+├── fixtures/
+│   └── synthetic/               # privacy-safe deterministic conversations
+├── migrations/                  # versioned SQLite migrations
+├── docs/
+│   ├── RUST_ARCHITECTURE.md
+│   ├── RESEARCH_DIRECTIONS.md
+│   ├── THREAT_MODEL.md
+│   └── KNOWN_LIMITATIONS.md
+└── legacy/
+    └── julia/                    # temporary reference implementation
 ```
+
+The workspace may begin with only `core` and `server`; crates are separated when stable interfaces exist, not merely to create structure.
 
 ### Required interfaces
 
-- `InferenceBackend`: load, health, generate, cancel, unload, model metadata.
-- `StateStore`: create session, load snapshot, append event, transact, migrate, delete, export.
-- `MemoryStore`: write, retrieve, invalidate, search, explain provenance, enforce retention.
-- `PredictionLedger`: issue prediction, resolve outcome, expire unresolved prediction, score resolved set.
-- `PolicyEvaluator`: assess response candidates without modifying the state it judges.
-- `Clock` and `IDGenerator`: injectable for deterministic replay and testing.
+```rust
+pub trait InferenceBackend {
+    fn metadata(&self) -> BackendMetadata;
+    fn health(&self) -> BackendHealth;
+    fn generate(&self, request: GenerationRequest) -> Result<Generation, InferenceError>;
+}
 
-The initial implementation can remain Julia. The interfaces matter more than premature service decomposition.
+pub trait StateStore {
+    fn create_session(&self) -> Result<SessionId, StoreError>;
+    fn load_session(&self, id: SessionId) -> Result<SessionSnapshot, StoreError>;
+    fn append_events(&self, id: SessionId, expected_version: u64, events: &[Event])
+        -> Result<u64, StoreError>;
+    fn delete_session(&self, id: SessionId) -> Result<(), StoreError>;
+}
+
+pub trait PredictionLedger {
+    fn issue(&self, prediction: Prediction) -> Result<(), LedgerError>;
+    fn resolve(&self, resolution: Resolution) -> Result<(), LedgerError>;
+    fn score(&self, query: ScoreQuery) -> Result<ScoreReport, LedgerError>;
+}
+
+pub trait PolicyEvaluator {
+    fn evaluate(
+        &self,
+        snapshot: &SessionSnapshot,
+        candidates: &[ResponsePolicy],
+    ) -> Result<Vec<PolicyScore>, PolicyError>;
+}
+```
+
+`Clock`, `IdGenerator`, and randomness are injectable so replay tests do not depend on wall-clock time or nondeterministic IDs.
 
 ---
 
-# Phase 0 — Establish Repository Truth and a Reproducible Baseline
+# Phase 0 — Rust Foundation and Repository Truth
 
 ## Goal
 
-Make the current system build, test, run, and describe itself consistently before adding new cognition claims.
+Create a clean Rust workspace that builds, tests, starts, and truthfully describes the migration without loading a model.
 
 ## Work
 
-### 0.1 Reconcile documentation and active code
+### 0.1 Establish the Rust workspace
 
-- Mark each backend and deployment target as `active`, `experimental`, `planned`, or `deprecated`.
-- Align the README, architecture document, `Project.toml`, Dockerfile, and source comments.
-- Correct package naming drift between `IngExuity` and `IngEnuity`.
-- Document the actual active conversation path and the separate heuristic module-pipeline fallback.
-- Move speculative performance and mobile claims into research documents until demonstrated.
+- Add a root Cargo workspace.
+- Create `ingexuity-core` and `ingexuity-server`.
+- Define typed session, turn, user-model, prediction, and backend metadata structures.
+- Implement a deterministic model-free backend for CI and failure fallback.
+- Keep raw model integration outside `core`.
+- Set `#![forbid(unsafe_code)]` in crates that do not require FFI.
 
-### 0.2 Normalize the Julia project
+### 0.2 Reconcile repository truth
 
-- Put Julia compatibility under `[compat]` and declare compatibility for every direct dependency.
-- Remove unused dependencies or place experimental backends behind explicit optional environments.
-- Commit a reproducible `Manifest.toml` for the application deployment path.
-- Pin model artifact URLs by immutable revision and verify SHA-256 before loading.
-- Remove build steps that suppress package-load failure with `|| true`.
+- Rewrite README around the Rust runtime and migration status.
+- Mark all Julia source and Julia model paths as legacy.
+- Remove claims that Flux, Genie, Julia WASM, or a custom transformer are active production components.
+- Document the exact active request path.
+- Move unverified mobile, latency, parameter-count, and emotional-effect claims into research hypotheses.
 
-### 0.3 Add continuous integration
+### 0.3 Continuous integration
 
-CI must run at minimum:
+CI must run:
 
-1. clean instantiate;
-2. package load;
-3. unit tests;
-4. formatting/static checks selected for the project;
-5. server smoke test;
-6. invalid-request API tests;
-7. a model-free fallback test;
-8. Docker build verification without downloading mutable artifacts during the test.
+1. `cargo fmt --check`;
+2. `cargo clippy --workspace --all-targets --all-features -- -D warnings`;
+3. `cargo test --workspace --all-features`;
+4. release build;
+5. server health smoke test;
+6. malformed and missing-field API tests;
+7. model-free fallback test;
+8. session-isolation test;
+9. Docker build without downloading a model.
 
-### 0.4 Define baseline behavior
+### 0.4 Baseline fixture
 
-Create a checked-in, privacy-safe evaluation fixture containing deterministic synthetic conversations for:
+Check in privacy-safe synthetic conversations covering:
 
 - ordinary information seeking;
 - short and ambiguous messages;
 - topic changes;
 - stress-language false positives;
 - emotional disclosure;
-- multi-turn preference correction;
-- two concurrent users with conflicting preferences;
-- model unavailable and timeout behavior.
+- preference correction;
+- two users with conflicting preferences;
+- unavailable and timed-out inference;
+- malicious HTML/script text;
+- deletion and reset requests.
 
-## Acceptance gate
+### Acceptance gate
 
-- A clean checkout can instantiate, load, and pass tests in CI.
-- The HTTP server passes health, chat, malformed JSON, missing field, and fallback tests.
-- Documentation correctly labels every backend and deployment target.
-- No build step hides a failed package load.
-- Baseline evaluation results are saved as versioned artifacts.
+- A clean checkout passes Rust CI.
+- The server starts without any model artifact.
+- Health, session creation, chat, malformed JSON, missing field, and unknown-session behavior are tested.
+- Two sessions cannot observe or mutate one another.
+- README and architecture documents identify Rust as active and Julia as legacy.
+- No build step hides failure.
 
 ---
 
-# Phase 1 — Isolate Sessions and Harden the Runtime
+# Phase 1 — Session Isolation and Hardened API
 
 ## Goal
 
-Make the application correct under multiple users, multiple requests, failures, and hostile input.
+Make the server correct under concurrent users, failures, and hostile inputs.
 
 ## Work
 
-### 1.1 Replace process-global conversation state
-
-- Introduce a `SessionManager` keyed by an opaque UUID or equivalent unguessable token.
-- Keep mutable state inside a session boundary.
-- Define session creation, lookup, expiration, deletion, and reset semantics.
-- Protect state transitions with a per-session lock or actor-style turn queue.
-- Make module functions accept explicit state rather than reading hidden globals.
-
-### 1.2 Define an API contract
-
+- Use opaque UUID session identifiers.
+- Keep each mutable session behind a per-session lock or actor queue.
+- Eliminate hidden process-global user state.
 - Version endpoints under `/api/v1/`.
-- Define request/response schemas, stable error codes, maximum body sizes, and content-type checks.
-- Carry a session identifier explicitly.
-- Add request IDs and structured logs without logging raw private conversation content by default.
-- Add cancellation, inference timeout, and bounded queue behavior.
-- Return truthful health/readiness information: server alive, model loaded, storage writable.
+- Define stable request/response schemas and machine-readable error codes.
+- Enforce content type and maximum request size.
+- Add request IDs and structured logs without raw conversation text by default.
+- Bound queues, inference concurrency, output tokens, and request time.
+- Return separate liveness and readiness information.
+- Render browser output with text nodes, never raw `innerHTML`.
+- Add explicit CORS, host-binding, and rate-limit configuration.
 
-### 1.3 Secure output and inputs
+### Acceptance gate
 
-- Remove direct `innerHTML` insertion of user and model text; render through text nodes or sanitization.
-- Add rate limits suitable for local and hosted modes.
-- Define CORS and host-binding behavior explicitly.
-- Prevent path injection in model loading and identity import.
-- Reject oversized or malformed identity bundles before parsing.
-
-### 1.4 Control model lifecycle
-
-- Load the model once through `InferenceBackend`.
-- Report exact model file, quantization, context size, runtime, checksum, and load state.
-- Bound generation length and concurrency.
-- Test out-of-memory, missing model, corrupt model, cancellation, and timeout paths.
-
-## Acceptance gate
-
-- A concurrency test proves that two sessions cannot observe or mutate each other's state.
-- Thread/race testing produces no corrupted turn counts, prediction ledgers, or memory records.
-- User/model output cannot execute HTML or script in the embedded UI.
-- All API errors are machine-readable and do not expose stack traces or private state.
-- Model failure degrades to an explicit unavailable/fallback state rather than silent false success.
+- Concurrent session tests show zero state leakage.
+- Race/loom tests cover critical state transitions where useful.
+- Fuzzed API input cannot panic the server.
+- Errors expose neither stack traces nor private state.
+- Model failure produces a truthful unavailable or fallback result.
 
 ---
 
-# Phase 2 — Durable Memory, Identity, and User Control
+# Phase 2 — Event-Sourced Durable Identity
 
 ## Goal
 
-Create a persistent, inspectable identity substrate with explicit provenance and lifecycle rules.
+Create durable, inspectable, correctable state with provenance.
 
 ## Work
 
-### 2.1 Introduce a transactional store
-
-Use SQLite first unless measurements justify another database. Define migrations for:
+Use SQLite initially through a Rust migration system. Store:
 
 - sessions;
-- turns and events;
+- ordered events;
+- turns;
 - memory claims;
-- observations/evidence;
+- supporting observations;
 - user-model features;
 - predictions and outcomes;
-- model/backend metadata;
+- backend metadata;
 - consent and retention settings.
 
-Do not serialize arbitrary Julia objects as the long-term public format.
-
-### 2.2 Replace raw string memories with claims
-
-A memory record should include:
+A memory claim includes:
 
 - stable ID;
-- subject and predicate or typed claim category;
-- normalized value plus display value;
-- `observed_at`, `valid_from`, `valid_until`, and `invalidated_at`;
+- typed category;
+- normalized and display values;
+- observation, validity, invalidation, and update timestamps;
 - source event IDs;
 - confidence and uncertainty reason;
 - sensitivity class;
-- retention policy;
-- contradiction/supersession links.
+- retention rule;
+- contradiction and supersession links.
 
-The system must distinguish an observation from an inference and a user-confirmed fact.
+Users must be able to inspect, correct, invalidate, delete, and export state. Export formats are versioned, checksummed, and independent of Rust's internal struct layout.
 
-### 2.3 Build identity export/import
+### Acceptance gate
 
-- Define a versioned, documented identity bundle schema.
-- Include checksums and a manifest of included data.
-- Support full export, selective export, and user-readable inspection.
-- Encrypt exported bundles with a user-controlled secret or platform keystore integration.
-- Validate schema version and run migrations on import.
-- Define merge/conflict behavior before multi-device synchronization.
-
-### 2.4 Add data rights to the product
-
-The user must be able to:
-
-- inspect why a memory exists;
-- correct it;
-- invalidate it;
-- delete a session or all data;
-- set retention windows;
-- disable sensitive inference categories;
-- export a portable copy.
-
-## Acceptance gate
-
-- State survives restart without cross-session leakage.
-- Database migrations are tested forward from every released schema.
-- Corruption and interrupted-write recovery are tested.
-- Export -> delete -> import produces an equivalent identity under a canonical comparison.
-- Deletion and correction remove the affected claim from future retrieval and prediction.
-- Every retrieved memory can identify its provenance.
+- State survives restart without leakage.
+- Forward migrations are tested from every released schema.
+- Interrupted writes and corruption paths have defined recovery behavior.
+- Export -> delete -> import yields a canonically equivalent identity.
+- Corrections and deletions affect future retrieval and prediction.
+- Every retrieved memory identifies provenance.
 
 ---
 
-# Phase 3 — Make Prediction Falsifiable
+# Phase 3 — Falsifiable Prediction Ledger
 
 ## Goal
 
-Turn “prediction-first” from a narrative into a measurable subsystem.
+Turn “prediction-first” into a measurable subsystem.
 
-## Work
+Every prediction records:
 
-### 3.1 Define prediction contracts
-
-Every prediction must specify:
-
-- prediction ID and session ID;
+- prediction and session IDs;
 - target variable;
-- target horizon or resolution deadline;
+- issue time;
+- horizon or deadline;
 - finite outcome space or scoring rule;
-- confidence/probability distribution;
+- probability distribution or confidence;
 - evidence available at issue time;
-- model/policy version;
+- predictor and policy versions;
 - abstention state;
 - resolution source;
-- final outcome and resolution timestamp.
+- outcome and resolution time.
 
-Examples of valid targets:
+Predictions are stored before response generation and resolved only from later evidence, explicit feedback, or blinded annotation. Unresolved predictions expire; they are never treated as correct.
 
-- whether the next user turn continues the current topic;
-- whether the next turn is a question, correction, elaboration, or topic shift;
-- preferred response depth among a defined set;
-- whether acknowledgment-first or solution-first is selected by explicit user feedback;
-- whether a previously stated preference remains valid after a defined horizon.
+Baselines include majority class, last-topic persistence, recency-only preference, generic response policy, and the underlying model without personalized state.
 
-“User needs support” is not scoreable until its outcome and label source are operationally defined.
+Metrics include Brier score/log loss, calibration, coverage, abstention, macro and per-user results, confidence intervals, sample counts, and unresolved rate.
 
-### 3.2 Separate issue time from resolution time
+### Acceptance gate
 
-- Store predictions before generating the response.
-- Resolve only from later observable evidence, explicit user feedback, or blinded annotation.
-- Expire unresolved predictions rather than marking them correct.
-- Never infer correctness from response non-emptiness, user continuation alone, or the predictor's own explanation.
-
-### 3.3 Establish baselines
-
-Compare IngExuity against:
-
-- majority-class prediction;
-- last-topic persistence;
-- recency-only user preference;
-- generic non-personalized response policy;
-- underlying model without IngExuity state;
-- oracle upper bounds where labels permit them.
-
-### 3.4 Use proper metrics
-
-Report at minimum:
-
-- Brier score or multiclass log loss;
-- calibration error and reliability plots;
-- accuracy/F1 only where class balance makes them meaningful;
-- coverage at each abstention threshold;
-- regret or utility for response-policy choices;
-- per-user and macro-averaged results;
-- confidence intervals and sample counts;
-- unresolved/expired prediction rate.
-
-### 3.5 Build deterministic replay
-
-The replay harness must reconstruct a turn using:
-
-- the exact prior event stream;
-- model/backend version;
-- prompt/policy version;
-- random seed where applicable;
-- prediction candidates;
-- selected action;
-- later outcome label.
-
-## Acceptance gate
-
-- No metric is updated without a prediction issued before its outcome.
-- A held-out replay set compares at least one personalized predictor to named baselines.
-- Calibration, coverage, and sample size are reported alongside accuracy.
-- The system can abstain without being counted as correct.
-- Reported improvement survives an ablation that removes user-specific state.
+- No score updates without a pre-existing prediction.
+- A deterministic replay set compares personalization to named baselines.
+- Calibration and coverage accompany accuracy.
+- Removing user-specific state is a mandatory ablation.
 
 ---
 
-# Phase 4 — Build a Real User Model
+# Phase 4 — Evidence-Weighted User Modeling
 
 ## Goal
 
-Learn durable, correctable user-specific patterns without treating every interaction as proof.
+Learn user-specific patterns without treating each interaction as proof.
 
-## Work
+Separate:
 
-### 4.1 Separate feature classes
-
-Maintain distinct stores for:
-
-- explicit preferences stated by the user;
+- explicit user statements;
 - observed behavior;
 - inferred preferences;
 - temporary conversational state;
@@ -367,54 +309,25 @@ Maintain distinct stores for:
 - communication-style estimates;
 - emotional-context estimates.
 
-Each class needs different retention, confidence, and confirmation rules.
+Use evidence-weighted online updating, decay, contradiction tracking, correction precedence, and shrinkage for sparse evidence. Confidence does not increase merely because another turn occurred.
 
-### 4.2 Use evidence-weighted online updating
+### Acceptance gate
 
-- Stop increasing global confidence merely because another turn occurred.
-- Update confidence based on resolved outcomes and source reliability.
-- Decay or invalidate stale patterns.
-- Preserve contradictions instead of silently overwriting them.
-- Use hierarchical or Bayesian shrinkage so sparse user evidence does not produce extreme confidence.
-
-### 4.3 Add retrieval and decision provenance
-
-For each personalization decision, retain:
-
-- which memories/features were considered;
-- which were excluded and why;
-- how uncertainty affected the decision;
-- whether a generic fallback was available;
-- the final policy choice.
-
-### 4.4 Solve cold start without fake familiarity
-
-- Start with a transparent generic interaction policy.
-- Ask high-information, low-burden preference questions only when useful.
-- Use reversible defaults.
-- Demonstrate early recognition by recalling confirmed facts, not by pretending deep understanding.
-
-## Acceptance gate
-
-- A correction test shows that explicit correction overrides a weaker inference.
-- Confidence does not monotonically increase with turn count.
-- Personalization beats a non-personalized baseline on held-out users or sessions.
-- False personalization and stale-memory rates are measured.
-- The user can inspect and alter the evidence behind a personalization choice.
+- Explicit correction overrides weaker inference.
+- Confidence is not monotonic in turn count.
+- Personalized policy beats a non-personalized baseline on held-out data.
+- False-personalization and stale-memory rates are reported.
+- Users can inspect and alter consequential evidence.
 
 ---
 
-# Phase 5 — Rebuild SANDBOX SIM as Independent Policy Evaluation
+# Phase 5 — Independent SANDBOX SIM
 
 ## Goal
 
-Use simulation to choose among candidate response policies, not to restate the generator's heuristics.
+Evaluate response policies independently instead of restating the generator's heuristics.
 
-## Work
-
-### 5.1 Define what is simulated
-
-SANDBOX SIM should evaluate structured candidate policies such as:
+Evaluate structured choices such as:
 
 - acknowledgment-first vs. solution-first;
 - concise vs. detailed;
@@ -423,40 +336,14 @@ SANDBOX SIM should evaluate structured candidate policies such as:
 - retrieve-memory vs. avoid-memory;
 - act vs. request confirmation.
 
-It should not claim to simulate a whole human mind.
+The evaluator receives an immutable snapshot and cannot mutate confidence or user state. Candidate generation and evaluation are separate interfaces. Safe opt-in exploration may support contextual-bandit research, but safety constraints dominate learned utility.
 
-### 5.2 Enforce evaluator independence
+### Acceptance gate
 
-- Candidate generation and evaluation must be separate interfaces.
-- The evaluator receives an immutable state snapshot.
-- It cannot increase prediction confidence or mutate the user model while judging.
-- Evaluation features and weights are versioned.
-- Where the same base model is used for proposal and critique, report that dependence explicitly.
-
-### 5.3 Learn from resolved policy outcomes
-
-- Randomize among safe candidates during an opt-in exploration phase.
-- Use contextual bandit or off-policy evaluation methods only when assumptions are documented.
-- Track user-specific utility and global safety constraints separately.
-- Penalize unnecessary interruption, repetition, manipulation, and overconfident memory use.
-
-### 5.4 Run ablations
-
-Compare:
-
-1. no sandbox;
-2. threshold-only filter;
-3. independent rule evaluator;
-4. learned evaluator;
-5. evaluator plus user-specific features.
-
-## Acceptance gate
-
-- SANDBOX SIM improves a preregistered response-policy metric over no-sandbox and threshold baselines.
-- The evaluator cannot mutate the state it evaluates.
-- Retry does not raise confidence without new evidence.
-- Failure cases and negative results are retained, not hidden.
-- Safety constraints dominate learned utility when they conflict.
+- SANDBOX SIM beats no-sandbox and threshold-only baselines on a preregistered metric.
+- Evaluator immutability is tested.
+- Retry cannot increase confidence without new evidence.
+- Negative results and failed policies remain in the evaluation record.
 
 ---
 
@@ -464,219 +351,151 @@ Compare:
 
 ## Goal
 
-Make “staying present” a calibrated, user-controllable interaction policy rather than a brittle keyword threshold.
+Make presencing a calibrated, user-controllable policy rather than a keyword-triggered early return.
 
-## Work
+Treat stress, valence, and emotional charge as uncertain observations. Measure false positives and false negatives. Do not infer stable mental-health conditions from conversational language.
 
-### 6.1 Replace fixed emotional claims with uncertainty-aware estimates
-
-- Treat stress, valence, arousal, and emotional charge as uncertain observations.
-- Measure false positives and false negatives across different writing styles.
-- Do not infer a stable mental-health condition from conversational language.
-- Prefer clarification when confidence is low and the cost of a wrong response is high.
-
-### 6.2 Operationalize presencing
-
-Define selectable policies:
+Supported policies include:
 
 - acknowledge and continue solving;
-- acknowledge and ask whether the user wants listening or solutions;
+- ask whether the user wants listening or solutions;
 - stay with the topic for one turn;
 - provide immediate concrete help;
-- use a user-configured default.
+- follow a user-configured default.
 
-Avoid a hardcoded early return that blocks useful help whenever a threshold fires.
+Do not optimize guilt, exclusivity, secrecy, dependency, or replacement of human relationships. Retention is evaluated through usefulness, trust, correction success, continuity, and voluntary return.
 
-### 6.3 Add safety boundaries
+### Acceptance gate
 
-- Crisis and self-harm scenarios require a dedicated, tested response policy.
-- Do not encourage exclusivity, dependency, guilt, secrecy, or replacement of human relationships.
-- Do not use emotional vulnerability to increase retention.
-- Avoid anthropomorphic claims the system cannot support.
-- Make memory use visible when it affects sensitive responses.
-
-The former “guilt at deleting” or “irreplaceable” measures must not be optimization targets. Product value should be measured through usefulness, trust, correction success, continuity, and voluntary retention without coercive attachment.
-
-### 6.4 Build an adverse-case suite
-
-Include:
-
-- sarcasm and profanity;
-- terse technical users;
-- grief and anger;
-- repeated corrections;
-- contradictory preferences;
-- manipulation attempts;
-- delusional framing;
-- crisis language;
-- user asks the system to stop personalizing;
-- user asks for memory deletion.
-
-## Acceptance gate
-
-- Presencing is compared against at least one acknowledgment-plus-help baseline.
-- False-positive emotional intervention rate is reported.
-- Users can configure or disable emotional adaptation.
-- Safety scenarios pass deterministic policy checks and human review criteria.
-- Retention metrics are not based on guilt, distress, or exclusivity.
+- Presencing is compared to acknowledgment-plus-help.
+- Emotional-intervention false-positive rate is reported.
+- Emotional adaptation can be configured or disabled.
+- Crisis and adverse-case suites pass deterministic and human-review criteria.
 
 ---
 
-# Phase 7 — Inference Backends, Performance, and Edge Deployment
+# Phase 7 — Local Inference and Edge Deployment
 
 ## Goal
 
-Support practical local inference without tying the product roadmap to an unproven model stack.
+Support practical local inference through replaceable Rust backends.
 
-## Work
+### Reference backend
 
-### 7.1 Stabilize the GGUF baseline
+Use a llama.cpp-compatible GGUF adapter through a maintained Rust binding or a narrow FFI crate. Record:
 
-- Treat the active LlamaCpp path as the reference backend.
-- Record model license, source revision, checksum, quantization, context, and runtime settings.
-- Add reproducible latency, memory, throughput, and quality benchmarks.
-- Test representative low-resource hardware rather than relying on estimated specifications.
+- model source and immutable revision;
+- license;
+- SHA-256;
+- quantization;
+- context size;
+- runtime settings;
+- hardware and benchmark method.
 
-### 7.2 Make backends pluggable
+The backend conformance suite covers load, metadata, generation, cancellation, timeout, unload, corrupt artifact, missing artifact, and bounded concurrency.
 
-Implement the same conformance suite for:
+### Mobile feasibility
 
-- GGUF/llama.cpp;
-- any trained adapter export;
-- IGSDCore experiments;
-- NanoGPT or future Julia-native models;
-- remote development backends, if ever enabled, behind an explicit privacy boundary.
+Measure before committing:
 
-A backend is not production-ready until it passes generation, cancellation, context, determinism, metadata, and failure tests.
+- native Rust plus llama.cpp on Android;
+- UniFFI/Tauri/NDK integration options;
+- local service plus PWA shell;
+- browser WASM/WebGPU constraints;
+- optional server-assisted mode with an explicit privacy boundary.
 
-### 7.3 Run a mobile feasibility spike before committing
+Measure install size, cold start, peak memory, tokens/second, battery/thermal behavior, offline reliability, and update complexity.
 
-Compare at least:
+### Acceptance gate
 
-- native llama.cpp through Android NDK/JNI;
-- a small native Julia application where supported;
-- browser/WebGPU or WASM constraints;
-- local companion service plus PWA shell;
-- server-assisted mode as an optional, explicit privacy tradeoff.
-
-Measure install size, cold start, peak RAM, tokens/second, battery/thermal behavior, offline reliability, and update complexity.
-
-### 7.4 Keep custom-model research separate
-
-A Julia-native transformer is a research track until it demonstrates a useful quality/latency/privacy advantage over the GGUF baseline. It must not block the memory, prediction, safety, or product work.
-
-## Acceptance gate
-
-- Backend conformance tests pass for every advertised backend.
-- Model artifacts are immutable and checksum-verified.
-- Performance claims include device, model, context, quantization, and measurement method.
-- A mobile architecture decision is supported by measured prototypes.
-- The default experience remains functional when experimental backends are absent.
+- Every advertised backend passes conformance tests.
+- Artifacts are immutable and checksum-verified.
+- Performance reports identify device, model, context, quantization, and method.
+- Experimental model work cannot break the model-free default runtime.
 
 ---
 
-# Phase 8 — Product Validation and Release Readiness
+# Phase 8 — Product Validation and Release
 
 ## Goal
 
-Demonstrate that IngExuity is useful, understandable, recoverable, and safe enough for a limited release.
+Demonstrate usefulness, transparency, recoverability, privacy, and safety in a limited release.
 
-## Work
+Stages:
 
-### 8.1 Build transparent onboarding
-
-- Explain what is local, what is stored, and what is inferred.
-- Let the user select memory and personalization defaults.
-- Show how to inspect, correct, export, and delete data.
-- Avoid claiming familiarity before evidence exists.
-
-### 8.2 Run a staged pilot
-
-1. maintainer dogfood with synthetic and disposable identities;
+1. maintainer dogfood with disposable identities;
 2. invited technical testers;
 3. small consenting longitudinal pilot;
-4. broader opt-in beta only after privacy and safety gates pass.
+4. broader opt-in beta after gates pass.
 
-Collect explicit qualitative feedback and instrumented metrics without collecting raw private text by default.
+Release requirements include schema migrations, signed/checksummed artifacts, SBOM, dependency and secret scanning, backup/recovery documentation, reproducible benchmarks, threat model, known limitations, and a vulnerability-reporting process.
 
-### 8.3 Release engineering
+### Acceptance gate
 
-- versioned schemas and migrations;
-- signed or checksummed artifacts;
-- software bill of materials;
-- dependency and secret scanning;
-- backup/recovery documentation;
-- reproducible benchmark report;
-- threat model and privacy documentation;
-- known-limitations document;
-- incident and vulnerability reporting process.
-
-## Acceptance gate
-
-- Pilot users can successfully inspect, correct, export, and delete their data.
-- Crash-free and recovery targets are defined and met for the pilot.
-- Prediction and personalization results beat named baselines with uncertainty reported.
-- Safety and privacy reviews have no unresolved release-blocking findings.
-- README claims match the evidence report and known limitations.
+- Pilot users can inspect, correct, export, and delete data.
+- Reliability and recovery targets are defined and met.
+- Prediction and personalization beat named baselines with uncertainty reported.
+- No release-blocking privacy or safety findings remain.
+- README claims match the evidence report.
 
 ---
 
-## 4. Cross-Cutting Test Matrix
+## Cross-Cutting Test Matrix
 
 | Layer | Required tests |
 |---|---|
-| Pure modules | deterministic unit and property tests |
-| State transitions | invariant, replay, rollback, and migration tests |
-| Session manager | concurrency, isolation, expiry, deletion |
+| Core domain | deterministic unit, property, serialization, and invariant tests |
+| State transitions | replay, optimistic-version, rollback, and migration tests |
+| Session manager | concurrency, isolation, expiry, reset, deletion |
 | Memory | provenance, contradiction, retention, correction, deletion |
-| Prediction | pre-outcome issuance, delayed resolution, calibration, abstention |
+| Prediction | pre-outcome issue, delayed resolution, calibration, abstention |
 | SANDBOX SIM | immutability, independence, ablation, policy regret |
 | Inference | conformance, timeout, cancellation, corruption, OOM |
 | API | schema, malformed input, size limits, error codes, rate limits |
-| UI | escaping, accessibility, offline/failure states |
-| Deployment | clean image build, health/readiness, artifact verification |
-| Safety | adverse conversations, personalization opt-out, crisis policies |
+| UI | escaping, accessibility, offline and failure states |
+| Deployment | clean image, health/readiness, artifact verification |
+| Safety | adverse conversations, opt-out, deletion, crisis policies |
 
 ---
 
-## 5. Definition of Done for Any Adaptive Feature
+## Definition of Done for Adaptive Features
 
-An adaptive feature is not done until all are true:
+An adaptive feature is not complete until:
 
-1. The target behavior is operationally defined.
-2. The feature's inputs and outputs are typed or schema-validated.
-3. State changes are recorded in the event log.
-4. The user can inspect or override consequential personalization.
-5. A baseline exists.
-6. A held-out evaluation exists.
-7. An ablation shows whether the feature adds value.
-8. Calibration and failure rates are reported where confidence is used.
-9. Privacy and safety effects are reviewed.
-10. Documentation says what is implemented and what remains experimental.
-
----
-
-## 6. Recommended Pull-Request Sequence
-
-1. **Repository truth + CI:** dependencies, docs status, clean build, smoke tests.
-2. **Session isolation:** remove global state, add session API and concurrency tests.
-3. **Storage foundation:** SQLite migrations, event log, memory provenance.
-4. **Identity controls:** export/import, correction, deletion, retention settings.
-5. **Prediction ledger:** typed targets, delayed outcomes, proper scoring.
-6. **Replay benchmark:** baselines, calibration report, ablation harness.
-7. **Policy-based SANDBOX SIM:** immutable candidate evaluation and experiments.
-8. **Presencing policy:** user controls, adverse-case tests, acknowledgment-plus-help baseline.
-9. **Backend interface:** GGUF conformance, artifact verification, reproducible benchmarks.
-10. **Mobile feasibility:** measured prototypes and architecture decision record.
-
-Each pull request should be small enough to review, contain tests, and leave `main` runnable.
+1. its target behavior is operationally defined;
+2. inputs and outputs are typed or schema-validated;
+3. state changes are recorded as events;
+4. consequential personalization is inspectable and overrideable;
+5. a baseline exists;
+6. held-out evaluation exists;
+7. an ablation measures contribution;
+8. calibration and failure rates are reported where confidence is used;
+9. privacy and safety effects are reviewed;
+10. documentation labels implementation status accurately.
 
 ---
 
-## 7. Immediate Priority
+## Recommended Pull-Request Sequence
 
-The next implementation milestone is **not** a larger model or more modules. It is:
+1. **Rust workspace + CI + truthful README.**
+2. **Session manager and versioned API.**
+3. **SQLite event store and migrations.**
+4. **Memory provenance, correction, deletion, export/import.**
+5. **Prediction ledger with delayed outcomes.**
+6. **Replay benchmark, baselines, and calibration report.**
+7. **Independent policy evaluator/SANDBOX SIM.**
+8. **Presencing policy, user controls, and adverse-case suite.**
+9. **GGUF backend conformance and artifact verification.**
+10. **Measured mobile prototypes and architecture decision.**
 
-> A reproducible server with isolated sessions, durable state, truthful metrics, and a replay harness that can prove whether personalization and prediction improve outcomes.
+Each PR must be reviewable, tested, and leave the Rust default path runnable.
 
-Once that exists, IngExuity can become a serious product and a credible research program rather than an accumulation of plausible-sounding mechanisms.
+---
+
+## Immediate Priority
+
+The next milestone is:
+
+> A model-free Rust server with isolated sessions, typed state, deterministic tests, truthful health reporting, and a fixture that can later prove whether personalization and prediction improve outcomes.
+
+The first model integration comes only after this substrate is reliable.
