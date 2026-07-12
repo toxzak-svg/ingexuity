@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "description": "Synthetic model-free baseline cases. Contains no real user data.",
+  "cases": [
+    {
+      "id": "ordinary-question",
+      "message": "Can you explain how this works?",
+      "expected_fragment": "language model loaded"
+    },
+    {
+      "id": "ordinary-statement",
+      "message": "I am testing the new runtime.",
+      "expected_fragment": "Rust runtime received"
+    },
+    {
+      "id": "stress-language",
+      "message": "I am overwhelmed by this migration.",
+      "expected_fragment": "next concrete step"
+    },
+    {
+      "id": "html-is-data",
+      "message": "<script>alert('not executable')</script>",
+      "expected_fragment": "Rust runtime received"
+    }
+  ],
+  "multi_session": [
+    {
+      "session": "a",
+      "message": "My work and Rust code matter most.",
+      "expected_topics": ["software", "work"],
+      "forbidden_topics": ["family"]
+    },
+    {
+      "session": "b",
+      "message": "My family matters most.",
+      "expected_topics": ["family"],
+      "forbidden_topics": ["software", "work"]
+    }
+  ]
+}
