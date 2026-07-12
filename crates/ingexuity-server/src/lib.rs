@@ -123,6 +123,11 @@ impl SessionManager {
         Some(entry)
     }
 
+    #[must_use]
+    pub fn ttl_seconds(&self) -> u64 {
+        self.ttl_ms.div_ceil(1000)
+    }
+
     pub async fn count(&self) -> usize {
         self.sweep_expired().await;
         self.sessions.read().await.len()
@@ -250,18 +255,12 @@ pub fn app(state: AppState) -> Router {
             "/api/v1/sessions/{session_id}",
             get(get_session).delete(delete_session),
         )
-        .route(
-            "/api/v1/sessions/{session_id}/reset",
-            post(reset_session),
-        )
+        .route("/api/v1/sessions/{session_id}/reset", post(reset_session))
         .route("/api/v1/chat", post(chat))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .layer(PropagateRequestIdLayer::new(request_id_header.clone()))
         .layer(TraceLayer::new_for_http())
-        .layer(SetRequestIdLayer::new(
-            request_id_header,
-            MakeRequestUuid,
-        ))
+        .layer(SetRequestIdLayer::new(request_id_header, MakeRequestUuid))
         .with_state(state)
 }
 
@@ -323,7 +322,7 @@ async fn create_session(
         StatusCode::CREATED,
         Json(CreateSessionResponse {
             session_id,
-            expires_in_seconds: DEFAULT_SESSION_TTL.as_secs(),
+            expires_in_seconds: state.sessions.ttl_seconds(),
         }),
     )
 }
