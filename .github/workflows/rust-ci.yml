@@ -1,4 +1,4 @@
-name: Diagnose durable runtime tests
+name: Stress durable runtime tests
 
 on:
   pull_request:
@@ -9,7 +9,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - name: Check out pull-request head
         uses: actions/checkout@v4
@@ -21,21 +21,39 @@ jobs:
         with:
           toolchain: 1.97.0
 
-      - name: Run workspace tests
-        id: test
+      - name: Compile test binaries
+        run: cargo test --locked --workspace --all-features --no-run
+
+      - name: Repeat exact workspace test command
+        id: stress
         continue-on-error: true
         shell: bash
         run: |
-          set -o pipefail
-          cargo test --locked --workspace --all-features -- --nocapture 2>&1 | tee durable-runtime-tests.log
+          set +e
+          : > durable-runtime-tests.log
+          status=0
+          for run in $(seq 1 10); do
+            echo "===== WORKSPACE TEST RUN ${run} =====" | tee -a durable-runtime-tests.log
+            cargo test --locked --workspace --all-features >> durable-runtime-tests.log 2>&1
+            status=$?
+            if [ "$status" -ne 0 ]; then
+              echo "FAILED_RUN=${run}" | tee -a durable-runtime-tests.log
+              break
+            fi
+          done
+          echo "$status" > durable-runtime-test-status
+          tail -n 220 durable-runtime-tests.log
+          exit "$status"
 
-      - name: Upload test output
+      - name: Upload stress output
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: durable-runtime-head-tests
-          path: durable-runtime-tests.log
+          name: durable-runtime-stress-tests
+          path: |
+            durable-runtime-tests.log
+            durable-runtime-test-status
 
-      - name: Fail when tests fail
-        if: ${{ steps.test.outcome != 'success' }}
-        run: exit 1
+      - name: Enforce recorded result
+        if: always()
+        run: test "$(cat durable-runtime-test-status)" = 0
