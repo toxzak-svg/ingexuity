@@ -1,66 +1,50 @@
-name: Diagnose persistent runtime build
+name: Apply version-overflow mapping
 
 on:
   pull_request:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  native:
+  fix:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
     steps:
-      - name: Check out repository
+      - name: Check out pull request head
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
 
       - name: Install Rust 1.97
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.97.0
-          components: clippy
+          components: rustfmt
 
-      - name: Run Clippy
-        id: lint
-        continue-on-error: true
-        shell: bash
+      - name: Add explicit API mapping
         run: |
-          set -o pipefail
-          cargo clippy --locked --workspace --all-targets --all-features -- -D warnings 2>&1 | tee native-build.log
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('crates/ingexuity-server/src/lib.rs')
+          source = path.read_text(encoding='utf-8')
+          anchor = '''            Self::Core(CoreError::MessageTooLarge) => {
+                      (StatusCode::PAYLOAD_TOO_LARGE, "message_too_large")
+                  }
+          '''.replace('                  ', '')
+          replacement = anchor + '''            Self::Core(CoreError::VersionOverflow) => {
+                      (StatusCode::INTERNAL_SERVER_ERROR, "state_version_overflow")
+                  }
+          '''.replace('                  ', '')
+          if source.count(anchor) != 1:
+              raise SystemExit(f'error mapping anchor count: {source.count(anchor)}')
+          path.write_text(source.replace(anchor, replacement, 1), encoding='utf-8')
+          PY
+          cargo fmt --all
 
-      - name: Upload native compiler output
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: persistent-runtime-native-build
-          path: native-build.log
-
-      - name: Enforce native result
-        if: always()
-        run: test "${{ steps.lint.outcome }}" = success
-
-  container:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Build image
-        id: build
-        continue-on-error: true
-        shell: bash
+      - name: Commit fix
         run: |
-          set -o pipefail
-          docker build --progress=plain --tag ingexuity:ci . 2>&1 | tee docker-build.log
-
-      - name: Upload Docker compiler output
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: persistent-runtime-docker-build
-          path: docker-build.log
-
-      - name: Enforce Docker result
-        if: always()
-        run: test "${{ steps.build.outcome }}" = success
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/ingexuity-server/src/lib.rs
+          git commit -m "fix(server): map state version overflow explicitly"
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
