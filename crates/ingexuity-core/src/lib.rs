@@ -69,6 +69,16 @@ impl ConversationState {
         }
     }
 
+    pub fn reset(&mut self) -> Result<(), CoreError> {
+        let next_version = self
+            .version
+            .checked_add(1)
+            .ok_or(CoreError::VersionOverflow)?;
+        *self = Self::new(self.session_id);
+        self.version = next_version;
+        Ok(())
+    }
+
     fn record_user_message(&mut self, message: &str) {
         self.turn_count += 1;
         self.version += 1;
@@ -192,6 +202,8 @@ pub enum CoreError {
     EmptyMessage,
     #[error("message exceeds {MAX_MESSAGE_BYTES} bytes")]
     MessageTooLarge,
+    #[error("conversation state version overflowed")]
+    VersionOverflow,
     #[error(transparent)]
     Inference(#[from] InferenceError),
 }
@@ -330,6 +342,21 @@ mod tests {
         assert_eq!(state.predictions.len(), 1);
         assert_eq!(state.predictions[0].status, PredictionStatus::Pending);
         assert_eq!(state.turns.len(), 2);
+    }
+
+    #[test]
+    fn reset_clears_personal_state_and_advances_version() {
+        let mut state = ConversationState::new(Uuid::new_v4());
+        process_turn(&mut state, "Rust work", &HeuristicBackend).unwrap();
+        let prior_version = state.version;
+
+        state.reset().unwrap();
+
+        assert_eq!(state.turn_count, 0);
+        assert!(state.turns.is_empty());
+        assert!(state.predictions.is_empty());
+        assert!(state.user_model.topics.is_empty());
+        assert_eq!(state.version, prior_version + 1);
     }
 
     #[test]

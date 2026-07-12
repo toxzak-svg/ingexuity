@@ -39,7 +39,8 @@ impl Persistence {
         created_at_ms: u64,
     ) -> Result<(), PersistenceError> {
         let store = self.store.clone();
-        tokio::task::spawn_blocking(move || store.create_session(&snapshot, created_at_ms)).await??;
+        tokio::task::spawn_blocking(move || store.create_session(&snapshot, created_at_ms))
+            .await??;
         Ok(())
     }
 

@@ -27,12 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     create_parent_directory(&database_path)?;
 
     let store = Arc::new(SqliteStore::open(&database_path)?);
-    let state = AppState::restore(
-        Arc::new(HeuristicBackend),
-        AppConfig::default(),
-        store,
-    )
-    .await?;
+    let state = AppState::restore(Arc::new(HeuristicBackend), AppConfig::default(), store).await?;
 
     let address: SocketAddr = bind.parse()?;
     let listener = tokio::net::TcpListener::bind(address).await?;
@@ -43,7 +38,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn create_parent_directory(path: &Path) -> Result<(), std::io::Error> {
-    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
         std::fs::create_dir_all(parent)?;
     }
     Ok(())

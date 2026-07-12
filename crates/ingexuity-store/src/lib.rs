@@ -340,6 +340,51 @@ impl SqliteStore {
         Ok(events)
     }
 
+    pub fn list_sessions(&self) -> Result<Vec<StoredSession>, StoreError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT session_id, version, snapshot_json, created_at_ms, updated_at_ms
+         FROM sessions ORDER BY created_at_ms ASC, session_id ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })?;
+
+        let mut sessions = Vec::new();
+        for row in rows {
+            let (session_id, version, snapshot_json, created_at_ms, updated_at_ms) = row?;
+            let session_id = Uuid::parse_str(&session_id)?;
+            let stored_version = from_i64(version)?;
+            let snapshot: ConversationState = serde_json::from_str(&snapshot_json)?;
+            if snapshot.session_id != session_id {
+                return Err(StoreError::SnapshotSessionMismatch {
+                    requested_id: session_id,
+                    snapshot_id: snapshot.session_id,
+                });
+            }
+            if snapshot.version != stored_version {
+                return Err(StoreError::SnapshotVersionMismatch {
+                    stored_version,
+                    snapshot_version: snapshot.version,
+                });
+            }
+            sessions.push(StoredSession {
+                session_id,
+                version: stored_version,
+                snapshot,
+                created_at_ms: from_i64(created_at_ms)?,
+                updated_at_ms: from_i64(updated_at_ms)?,
+            });
+        }
+        Ok(sessions)
+    }
+
     pub fn delete_session(&self, session_id: SessionId) -> Result<bool, StoreError> {
         let connection = self.connection()?;
         let deleted = connection.execute(
@@ -518,6 +563,20 @@ mod tests {
         assert!(store.load_session(session_id).unwrap().is_none());
         assert!(store.list_events(session_id).unwrap().is_empty());
         assert_eq!(store.session_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn list_sessions_returns_valid_snapshots_in_stable_order() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let first = ConversationState::new(Uuid::new_v4());
+        let second = ConversationState::new(Uuid::new_v4());
+        store.create_session(&first, 100).unwrap();
+        store.create_session(&second, 200).unwrap();
+
+        let sessions = store.list_sessions().unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].session_id, first.session_id);
+        assert_eq!(sessions[1].session_id, second.session_id);
     }
 
     #[test]

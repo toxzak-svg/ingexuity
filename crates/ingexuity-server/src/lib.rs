@@ -332,7 +332,7 @@ impl AppState {
         );
         state.persistence.quick_check().await?;
         for stored in state.persistence.list_sessions().await? {
-            state.sessions.restore(stored).await;
+            let _restored = state.sessions.restore(stored).await;
         }
         state.purge_expired().await.map_err(|error| match error {
             AppError::Persistence(source) => AppInitError::Persistence(source),
@@ -508,7 +508,7 @@ async fn reset_session(
     }
 
     let previous = guard.clone();
-    guard.reset();
+    guard.reset()?;
     let next = guard.clone();
     let now_ms = state.sessions.now_millis();
     let event = NewEvent::new(
@@ -604,7 +604,7 @@ async fn chat(
         NewEvent::new(
             "turn.assistant_recorded",
             json!({
-                "backend_id": backend.id,
+                "backend_id": backend.id.clone(),
                 "state_version": state_version
             }),
             now_ms,
@@ -613,13 +613,7 @@ async fn chat(
 
     if let Err(error) = state
         .persistence
-        .append_events(
-            request.session_id,
-            previous.version,
-            events,
-            next,
-            now_ms,
-        )
+        .append_events(request.session_id, previous.version, events, next, now_ms)
         .await
     {
         *guard = previous;
@@ -939,13 +933,9 @@ mod tests {
         drop(store);
 
         let reopened = Arc::new(SqliteStore::open(&path).unwrap());
-        let second = AppState::restore(
-            Arc::new(HeuristicBackend),
-            AppConfig::default(),
-            reopened,
-        )
-        .await
-        .unwrap();
+        let second = AppState::restore(Arc::new(HeuristicBackend), AppConfig::default(), reopened)
+            .await
+            .unwrap();
         let recovered = second.sessions.snapshot(session_id).await.unwrap();
         assert_eq!(recovered.turn_count, 1);
         assert!(recovered.user_model.topics.contains("software"));
@@ -973,12 +963,7 @@ mod tests {
         let clock = Arc::new(ManualClock::default());
         let sessions = SessionManager::with_clock(Duration::from_millis(100), clock.clone());
         let store = Arc::new(SqliteStore::open_in_memory().unwrap());
-        let state = AppState::with_store(
-            Arc::new(HeuristicBackend),
-            sessions,
-            1,
-            store.clone(),
-        );
+        let state = AppState::with_store(Arc::new(HeuristicBackend), sessions, 1, store.clone());
         let router = app(state.clone());
         let session_id = create_via_api(&router).await;
         clock.advance(101);
