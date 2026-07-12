@@ -35,7 +35,17 @@ jobs:
         run: julia --project=. --color=yes -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()'
 
       - name: Run package and Julia-native model tests
-        run: julia --project=. --color=yes -e 'using Pkg; Pkg.test(; coverage=true)'
+        shell: bash
+        run: |
+          set -o pipefail
+          julia --project=. --color=yes -e 'using Pkg; Pkg.test(; coverage=true)' 2>&1 | tee julia-tests.log
+
+      - name: Upload Julia test output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: julia-tests
+          path: julia-tests.log
 
       - name: Verify package load without a downloaded model
         run: julia --project=. --color=yes -e 'using IngExuity; @assert !IngExuity.is_local_loaded()'
