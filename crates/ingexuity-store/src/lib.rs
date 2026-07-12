@@ -490,7 +490,7 @@ mod tests {
         let event = NewEvent::new("turn.completed", json!({}), 110);
 
         let error = store
-            .append_events(session_id, 9, &[event], &next, 111)
+            .append_events(session_id, 1, &[event], &next, 111)
             .unwrap_err();
         assert!(matches!(error, StoreError::VersionConflict { .. }));
         assert!(store.list_events(session_id).unwrap().is_empty());
