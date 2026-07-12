@@ -1,119 +1,102 @@
-name: Materialize SQLite store
+name: Rust CI
 
 on:
+  push:
+    branches: [main]
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: rust-ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  materialize:
+  test:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
-      - name: Check out pull request head
+      - name: Check out repository
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.ref }}
 
       - name: Install Rust 1.97
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.97.0
-          components: rustfmt
+          components: rustfmt, clippy
 
-      - name: Bind code to checked-in migration and typed corruption errors
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --locked --workspace --all-features
+
+      - name: Build release binary
+        run: cargo build --locked --workspace --release
+
+      - name: Start model-free server
+        run: |
+          target/release/ingexuity-server > /tmp/ingexuity.log 2>&1 &
+          echo $! > /tmp/ingexuity.pid
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8000/health/live > /tmp/live.json \
+              && curl --fail --silent http://127.0.0.1:8000/health/ready > /tmp/ready.json; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/ingexuity.log
+          exit 1
+
+      - name: Verify health contracts
         run: |
           python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path('crates/ingexuity-store/src/lib.rs')
-          source = path.read_text(encoding='utf-8')
-
-          start = source.index('const MIGRATIONS:')
-          end = source.index('\n\n#[derive(Debug, Error)]', start)
-          source = (
-              source[:start]
-              + 'const MIGRATIONS: &[(u32, &str)] = &[(1, include_str!("../../../migrations/0001_event_store.sql"))];'
-              + source[end:]
-          )
-
-          serialization_line = '    Serialization(#[from] serde_json::Error),\n'
-          if serialization_line not in source:
-              raise SystemExit('serialization line not found')
-          source = source.replace(
-              serialization_line,
-              serialization_line
-              + '    #[error("stored UUID is invalid: {0}")]\n'
-              + '    InvalidUuid(#[from] uuid::Error),\n',
-              1,
-          )
-
-          version_error_anchor = '    #[error("snapshot version must advance beyond {expected}, got {actual}")]\n'
-          if version_error_anchor not in source:
-              raise SystemExit('version error anchor not found')
-          source = source.replace(
-              version_error_anchor,
-              '    #[error("stored snapshot version {snapshot_version} does not match row version {stored_version}")]\n'
-              + '    SnapshotVersionMismatch {\n'
-              + '        stored_version: u64,\n'
-              + '        snapshot_version: u64,\n'
-              + '    },\n'
-              + version_error_anchor,
-              1,
-          )
-
-          load_start = source.index('    pub fn load_session(')
-          load_end = source.index('    pub fn append_events(', load_start)
-          load = source[load_start:load_end]
-          stored_anchor = '            Ok(StoredSession {\n'
-          if stored_anchor not in load:
-              raise SystemExit('stored session anchor not found')
-          load = load.replace(
-              stored_anchor,
-              '            let stored_version = from_i64(version)?;\n'
-              + '            if snapshot.version != stored_version {\n'
-              + '                return Err(StoreError::SnapshotVersionMismatch {\n'
-              + '                    stored_version,\n'
-              + '                    snapshot_version: snapshot.version,\n'
-              + '                });\n'
-              + '            }\n'
-              + stored_anchor,
-              1,
-          )
-          version_line = '                version: from_i64(version)?,\n'
-          if version_line not in load:
-              raise SystemExit('stored version line not found')
-          load = load.replace(version_line, '                version: stored_version,\n', 1)
-          source = source[:load_start] + load + source[load_end:]
-
-          list_start = source.index('    pub fn list_events(')
-          list_end = source.index('    pub fn delete_session(', list_start)
-          listing = source[list_start:list_end]
-          uuid_start = listing.index('                event_id: Uuid::parse_str(&event_id)')
-          uuid_end = listing.index('                event_type,', uuid_start)
-          listing = (
-              listing[:uuid_start]
-              + '                event_id: Uuid::parse_str(&event_id)?,\n'
-              + listing[uuid_end:]
-          )
-          source = source[:list_start] + listing + source[list_end:]
-
-          path.write_text(source, encoding='utf-8')
+          import json
+          with open('/tmp/live.json', encoding='utf-8') as handle:
+              live = json.load(handle)
+          with open('/tmp/ready.json', encoding='utf-8') as handle:
+              ready = json.load(handle)
+          assert live['status'] == 'ok', live
+          assert live['runtime'] == 'rust', live
+          assert ready['status'] == 'ready', ready
+          assert ready['runtime'] == 'rust', ready
+          assert ready['backend'] == 'ready', ready
+          assert ready['available_inference_slots'] >= 1, ready
           PY
 
-      - name: Format and resolve dependencies
+      - name: Stop server
+        if: always()
         run: |
-          cargo fmt --all
-          cargo generate-lockfile
-
-      - name: Commit generated files
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Cargo.lock crates/**/*.rs
-          if git diff --cached --quiet; then
-            echo "No generated changes."
-          else
-            git commit -m "build: materialize SQLite store and lockfile"
-            git push origin HEAD:${{ github.event.pull_request.head.ref }}
+          if [ -f /tmp/ingexuity.pid ]; then
+            kill "$(cat /tmp/ingexuity.pid)" || true
           fi
+          cat /tmp/ingexuity.log || true
+
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build model-free image
+        run: docker build --tag ingexuity:ci .
+
+      - name: Smoke test container
+        run: |
+          docker run --detach --rm --name ingexuity-ci -p 8000:8000 ingexuity:ci
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8000/health/live > /tmp/container-live.json \
+              && curl --fail --silent http://127.0.0.1:8000/health/ready > /tmp/container-ready.json; then
+              docker stop ingexuity-ci
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs ingexuity-ci
+          docker stop ingexuity-ci || true
+          exit 1
