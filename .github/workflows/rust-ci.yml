@@ -37,66 +37,66 @@ jobs:
               + source[end:]
           )
 
-          serialization = '''    #[error("state serialization failed: {0}")]
-              Serialization(#[from] serde_json::Error),
-          '''.replace('              ', '')
-          typed = serialization + '''    #[error("stored UUID is invalid: {0}")]
-              InvalidUuid(#[from] uuid::Error),
-          '''.replace('              ', '')
-          if source.count(serialization) != 1:
-              raise SystemExit('serialization variant anchor not found exactly once')
-          source = source.replace(serialization, typed, 1)
-
-          mismatch = '''    #[error("snapshot session {snapshot_id} does not match requested session {requested_id}")]
-              SnapshotSessionMismatch {
-                  requested_id: SessionId,
-                  snapshot_id: SessionId,
-              },
-          '''.replace('              ', '')
-          mismatch_plus_version = mismatch + '''    #[error("stored snapshot version {snapshot_version} does not match row version {stored_version}")]
-              SnapshotVersionMismatch {
-                  stored_version: u64,
-                  snapshot_version: u64,
-              },
-          '''.replace('              ', '')
-          if source.count(mismatch) != 1:
-              raise SystemExit('snapshot mismatch anchor not found exactly once')
-          source = source.replace(mismatch, mismatch_plus_version, 1)
-
-          old_version = '''            Ok(StoredSession {
-                  session_id,
-                  version: from_i64(version)?,
-                  snapshot,
-                  created_at_ms: from_i64(created_at_ms)?,
-                  updated_at_ms: from_i64(updated_at_ms)?,
-              })
-          '''.replace('              ', '')
-          new_version = '''            let stored_version = from_i64(version)?;
-              if snapshot.version != stored_version {
-                  return Err(StoreError::SnapshotVersionMismatch {
-                      stored_version,
-                      snapshot_version: snapshot.version,
-                  });
-              }
-              Ok(StoredSession {
-                  session_id,
-                  version: stored_version,
-                  snapshot,
-                  created_at_ms: from_i64(created_at_ms)?,
-                  updated_at_ms: from_i64(updated_at_ms)?,
-              })
-          '''.replace('              ', '')
-          if source.count(old_version) != 1:
-              raise SystemExit('stored session construction anchor not found exactly once')
-          source = source.replace(old_version, new_version, 1)
-
-          uuid_start = source.index('                event_id: Uuid::parse_str(&event_id)')
-          uuid_end = source.index('                event_type,', uuid_start)
-          source = (
-              source[:uuid_start]
-              + '                event_id: Uuid::parse_str(&event_id)?,\n'
-              + source[uuid_end:]
+          serialization_line = '    Serialization(#[from] serde_json::Error),\n'
+          if serialization_line not in source:
+              raise SystemExit('serialization line not found')
+          source = source.replace(
+              serialization_line,
+              serialization_line
+              + '    #[error("stored UUID is invalid: {0}")]\n'
+              + '    InvalidUuid(#[from] uuid::Error),\n',
+              1,
           )
+
+          version_error_anchor = '    #[error("snapshot version must advance beyond {expected}, got {actual}")]\n'
+          if version_error_anchor not in source:
+              raise SystemExit('version error anchor not found')
+          source = source.replace(
+              version_error_anchor,
+              '    #[error("stored snapshot version {snapshot_version} does not match row version {stored_version}")]\n'
+              + '    SnapshotVersionMismatch {\n'
+              + '        stored_version: u64,\n'
+              + '        snapshot_version: u64,\n'
+              + '    },\n'
+              + version_error_anchor,
+              1,
+          )
+
+          load_start = source.index('    pub fn load_session(')
+          load_end = source.index('    pub fn append_events(', load_start)
+          load = source[load_start:load_end]
+          stored_anchor = '            Ok(StoredSession {\n'
+          if stored_anchor not in load:
+              raise SystemExit('stored session anchor not found')
+          load = load.replace(
+              stored_anchor,
+              '            let stored_version = from_i64(version)?;\n'
+              + '            if snapshot.version != stored_version {\n'
+              + '                return Err(StoreError::SnapshotVersionMismatch {\n'
+              + '                    stored_version,\n'
+              + '                    snapshot_version: snapshot.version,\n'
+              + '                });\n'
+              + '            }\n'
+              + stored_anchor,
+              1,
+          )
+          version_line = '                version: from_i64(version)?,\n'
+          if version_line not in load:
+              raise SystemExit('stored version line not found')
+          load = load.replace(version_line, '                version: stored_version,\n', 1)
+          source = source[:load_start] + load + source[load_end:]
+
+          list_start = source.index('    pub fn list_events(')
+          list_end = source.index('    pub fn delete_session(', list_start)
+          listing = source[list_start:list_end]
+          uuid_start = listing.index('                event_id: Uuid::parse_str(&event_id)')
+          uuid_end = listing.index('                event_type,', uuid_start)
+          listing = (
+              listing[:uuid_start]
+              + '                event_id: Uuid::parse_str(&event_id)?,\n'
+              + listing[uuid_end:]
+          )
+          source = source[:list_start] + listing + source[list_end:]
 
           path.write_text(source, encoding='utf-8')
           PY
