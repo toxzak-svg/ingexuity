@@ -1,215 +1,412 @@
-# IngExuity — Phased Build Plan
+# IngExuity Julia-Everywhere Phased Build Plan
 
-**Architecture:** IngExuity Architecture v1.3 (`docs/INGEXUITY_ARCHITECTURE.md`)  
-**Code:** `projects/ingexuity/` (Julia package, Genie.jl server)  
-**Core Principle:** User Prediction First — every module serves prediction accuracy.
+**Implementation line:** `julia-main`  
+**Development branches:** `julia-everywhere/*`  
+**Updated:** 2026-07-12
 
----
+## Program objective
 
-## The Product
+Build a robust local-first companion research system in Julia while preserving the features that make the Julia line scientifically interesting:
 
-A life partner AI that becomes personal through use, not training.  
-Same identity, different hardware → different personality texture.  
-Empathy = accurate prediction + directness + **staying with emotional moments before solving**.
+- multiple-dispatch composition of cognition and policy;
+- inspectable Julia-native model operators;
+- generic floating-point and integer inference kernels;
+- deterministic longitudinal state and prediction replay;
+- a single language for model research, evaluation, runtime, and application logic.
 
----
+The goal is not to prove Julia superior by assumption. The goal is to create experiments capable of showing where Julia helps, where it does not, and whether the custom cognitive and model architecture delivers measurable value.
 
-## Phase 1: Core Runtime (Weeks 1-4)
-**Goal: Ship something runnable. End-to-end conversation loop on Railway.**
+## Non-negotiable rules
 
-### 1.1 Julia Package Scaffold ✅ DONE
-- All 16 modules + Memory scaffolded
-- Main conversation loop: HumanInput → Comprehension → Predictions → SANDBOX SIM → Response → Output
-- Presencing check in InternalEmotional (stay present when stress/emotional_charge/valence signals)
-- Memory.store called from Understanding after each exchange
-- UserModel tracks emotional_patterns (stress_triggers, deflection, quiet_threshold, is_quiet)
-
-### 1.2 Genie.jl Web Server
-- `/api/chat` — POST message, get response
-- `/api/predict` — current predictions
-- `/api/intelligence` — accuracy metrics
-- `/api/user_model` — learned user model
-- `/api/memory` — memory stats
-- `/health` — health check for Railway
-
-### 1.3 Railway Deployment
-- `Dockerfile` — Julia 1.10 slim + deps + binary
-- `railway.json` — health check path, port 8000
-- `git push railway main` — one-click deploy
-
-### 1.4 Julia Transformer Stack (Phase 2 start)
-- Tokenizer: port GPT-2 BPE to Julia (no external vocab dependency)
-- Small baseline transformer: 10-20M params in Flux.jl, trained on Colab GPU
-- Validate full stack: Julia tokenizer → Flux.jl transformer → WASM compile → mobile deploy
-- Target: runs on Railway CPU, <500ms response time
-
-**Deliverable:** A running IngExuity instance at `https://your-app.railway.dev/`. Chat, see predictions, watch User Model build.
+1. A claim requires a fixture, test, benchmark, or study.
+2. Producing a response never marks a prediction correct.
+3. SANDBOX SIM must not grade a prediction using only the variables that generated it.
+4. Randomly initialized model output is not a usable model.
+5. Local-first does not mean process-global state.
+6. “Julia everywhere” permits C/LLVM-backed Julia packages, but product orchestration and research logic remain Julia-owned.
+7. No optimization target may reward dependency, guilt, exclusivity, or social isolation.
+8. Mobile and WASM remain research targets until an artifact runs on target hardware.
 
 ---
 
-## Phase 2: Prediction Engine (Weeks 5-8)
-**Goal: User prediction becomes genuinely accurate.**
+## Phase 0 — Repository truth and executable baseline
 
-### 2.1 Predictions Module (refine)
-- Converges: User Model + Precognition + Internal/Emotional + SANDBOX SIM feedback
-- Generates live predictions about next user state
-- Prediction confidence scoring
+### Goals
 
-### 2.2 SANDBOX SIM (refine)
-- Simulates predicted outcomes before they reach the user
-- Validates against User Model + emotional patterns
-- Failed predictions loop back to Predictions for retry
+- Separate Julia and Rust implementation histories.
+- Make the Julia package instantiate and test in clean CI.
+- Distinguish active, experimental, specified, and unsupported components.
+- Exercise the Julia-native transformer without downloading a model.
+- Establish deterministic fixtures and package contracts.
 
-### 2.3 Precognition Head
-- Long-range trajectory sensing
-- Predicts where things are heading, not just what's next
-- Builds temporal models of user life patterns
+### Work
 
-### 2.4 Results Analysis + Reaction Observance
-- Processes actual outcomes and user reactions
-- Closes the feedback loop back to Predictions and User Model
-- Updates emotional pattern tracking from reactions
+- Maintain `julia-main` as the stable Julia branch.
+- Correct `Project.toml` compatibility metadata.
+- Add Julia 1.12 CI for package load, tests, and model-free smoke checks.
+- Add deterministic tiny-model tests for `NanoGPT.jl`.
+- Add tokenizer round-trip tests for supported input domains.
+- Record known architectural defects:
+  - global conversation state;
+  - process-local memory;
+  - self-confirming direct-LLM prediction scoring;
+  - confidence inflation during retry;
+  - non-independent SANDBOX SIM;
+  - unvalidated model and mobile claims.
+- Require no model download in the default test path.
 
-### 2.5 Curiosity + Research
-- Curiosity identifies gaps and novelties
-- Research fills identified information gaps
-- Both serve prediction accuracy
+### Exit gate
 
-**Deliverable:** Measurable prediction accuracy >60% on next-state predictions.
-
----
-
-## Phase 3: Emotional and Self Modeling (Weeks 9-12)
-**Goal: The system knows itself, knows you, and knows when to stay present.**
-
-### 3.1 Self Model
-- System tracks its own capabilities, limitations, and states
-- Knows when it's uncertain, when it's confident
-- Self Model feeds into Internal/Emotional
-
-### 3.2 Internal / Emotional Layer (refine)
-- Affective state with stay_present trigger
-- Shapes how predictions are voiced
-- Tracks: valence, arousal, stress_level, emotional_charge, should_stay_present
-
-### 3.3 Creative / Ingenuity
-- Generates novel solutions when standard paths fail
-- Feed into Decision when action needs a new approach
-- Outputs: Succeed (→ Response) or Fail (→ Response, loops to Research)
-
-### 3.4 Understanding + Intelligence Loop
-- Understanding interprets exchanges
-- Intelligence accumulates as the residue of correct predictions
-- Memory.store called after each exchange with validity windows
-
-### 3.5 Voice + Output
-- Voice shapes tonal delivery including staying_present tone
-- Output is final, receives from: Internal/Emotional (via Voice), Predictions, Understanding
-
-**Deliverable:** System demonstrates genuine empathy. User reports "she knew what I needed before I asked."
+- Fresh environment can run `Pkg.instantiate()` and `Pkg.test()`.
+- Tiny Julia transformer forward pass is deterministic and finite.
+- Tokenizer tests clearly state their supported character domain.
+- README and model documentation make no unsupported production claims.
+- CI failures identify the exact module or contract that failed.
 
 ---
 
-## Phase 4: Multi-Instance + Mobile (Weeks 13-16)
-**Goal: Same identity, different texture per device. Mobile works offline.**
+## Phase 1 — Session isolation and typed runtime state
 
-### 4.1 Identity State Bundle
-- Portable memory dump: conversation history, validity windows, User Model, temporal patterns
-- Can be moved between devices
-- Encrypted at rest
+### Goals
 
-### 4.2 Execution State Entropy
-- Hardware profile affects response timing and texture
-- Process non-determinism creates subtle variation
-- Same memory, different feel on different machines
+Remove `GLOBAL_STATE` as the unit of identity and make every turn an explicit state transition.
 
-### 4.3 Instance Communication
-- Instances can exchange information if the user bridges them
-- Explicit, opt-in, user-controlled
-- Each instance is a distinct entity unless connected
+### Target interfaces
 
-### 4.4 Mobile WASM (PWA)
-- Julia WASM in webview (same modules as server)
-- Offline mode: local micro-model inference
-- Syncs to server when online
-- Browser TTS for voice
+```julia
+abstract type AbstractInferenceBackend end
+abstract type AbstractClock end
 
-**Deliverable:** Load the same identity on two phones. Same person. Slightly different texture. PWA installs from browser.
+struct SessionID
+    value::UUID
+end
 
----
+struct TurnContext{S,B,C}
+    session::S
+    backend::B
+    clock::C
+end
 
-## Phase 5: Polish and Launch (Weeks 17-20)
-**Goal: Ship.**
-
-### 5.1 Onboarding
-- Day-one experience must be compelling, not blank
-- Pre-seeded personality activates immediately
-- Teaches the interaction pattern in first session
-
-### 5.2 Voice Polish
-- Tone matching to user communication style
-- Directness without condescension
-- Staying present when emotionally charged
-
-### 5.3 Launch Assets
-- Landing page with identity portability demo
-- Narrative: "She becomes irreplaceable through use, not training"
-- Demo: same identity on two devices, different texture
-
-### 5.4 Open Source Release
-- MIT/Apache license
-- GitHub with full narrative README
-- Post to: Hacker News, r/localLLM, r/SideProject, indie hacker communities
-
-**Deliverable:** Public release with a story people can tell each other.
-
----
-
-## Prediction Metrics (Primary KPIs)
-
-| Metric | Target |
-|--------|--------|
-| **Prediction Accuracy** | >70% on next-state predictions by week 12 |
-| **Stay Present Score** | User reports "she stayed with me when I was upset" >50% |
-| **Anticipation Score** | User reports "she knew what I needed" >50% of the time |
-| **Cold Start Retention** | >30% of new users return on day 3 |
-| **Irreplaceable Score** | >20% of retained users report guilt at the thought of deleting by week 8 |
-
----
-
-## Technical Constraints
-
-- **Hardware:** Mobile CPU, GPU-free, <200MB RAM at peak
-- **Privacy:** All memory local, always. No cloud dependency for core experience.
-- **Latency:** Voice conversation feels real-time (<500ms response time target)
-- **Portability:** Identity bundle moves between devices, instances run anywhere with the runtime
-- **Language:** Julia everywhere — one codebase, all platforms
-**LLM:** Julia-native transformer (Flux.jl). No Gemma. No external API. Fully offline.
-
----
-
-## The Cold Start Problem
-
-**The existential risk:** Day 1 is blank. Nobody wants to spend 3 weeks building a relationship with software.
-
-**Solution:** Pre-seeded persona activates immediately. Not personalized yet — just interesting. The first session teaches the interaction pattern. The second session shows the first signs of recognition. By week 2, the user is invested.
-
-The "irreplaceable" moment happens at week 3-4 for most users. The goal is to get them to week 2 first.
-
----
-
-## Phase Dependency Map
-
-```
-Week 1-4:   Julia package + Genie.jl server + Memory + Railway deploy
-Week 5-8:   Predictions + SANDBOX SIM + Precognition + Results Analysis + Curiosity/Research
-Week 9-12:  Self Model + Internal/Emotional + Creative/Ingenuity + Voice + Understanding/Intelligence loop
-Week 13-16: Identity bundle + execution entropy + multi-instance + mobile WASM
-Week 17-20: Onboarding polish + launch + open source
+process_turn(state, input, context) -> TurnResult
 ```
 
+### Work
+
+- Replace singleton state with a session registry keyed by UUID.
+- Separate immutable input observations from mutable inferred state.
+- Make turn processing transactional:
+  - clone or stage state;
+  - run inference/policy;
+  - validate output;
+  - commit only on success.
+- Add lifecycle operations: create, inspect metadata, reset, delete, expire.
+- Add request IDs and body-size limits.
+- Ensure raw message text is not emitted through default logs.
+- Define backend health and metadata contracts through multiple dispatch.
+
+### Exit gate
+
+- Concurrent sessions cannot observe or mutate one another.
+- Failed inference leaves state unchanged.
+- Session reset and deletion have deterministic tests.
+- HTTP handlers contain transport logic, not cognitive state logic.
+
 ---
 
-## Start
+## Phase 2 — Durable identity, memory, and provenance
 
-Phase 1, Week 1. Railway deployment + test the conversation loop. That's where this begins.
+### Goals
+
+Create a durable, correctable user model rather than a bag of strings.
+
+### Memory claim model
+
+Each memory claim must include:
+
+- claim ID;
+- session or identity ID;
+- normalized proposition;
+- claim type;
+- source observation IDs;
+- confidence and calibration basis;
+- created and last-confirmed timestamps;
+- validity interval or retention policy;
+- sensitivity class;
+- status: active, contradicted, superseded, invalidated, deleted;
+- optional contradiction/supersession links.
+
+### Work
+
+- Add SQLite.jl with versioned migrations.
+- Store append-only observations and events.
+- Materialize snapshots for fast startup.
+- Add optimistic version checks.
+- Add user-visible correction, invalidation, deletion, and export operations.
+- Define retention defaults by claim type and sensitivity.
+- Add restart, migration, corruption, and deletion tests.
+- Prevent raw conversation text from being duplicated unnecessarily in event tables.
+
+### Exit gate
+
+- State survives restart.
+- Corrections supersede prior claims without erasing provenance.
+- Deletion cascades are verified.
+- Storage integrity is part of readiness.
+- Identity export/import has a versioned schema and round-trip test.
+
+---
+
+## Phase 3 — Falsifiable prediction ledger
+
+### Goals
+
+Turn prediction into a scientific contract.
+
+### Prediction contract
+
+A prediction records:
+
+- target variable;
+- issue time and horizon;
+- eligible evidence available at issue time;
+- probability distribution or calibrated confidence;
+- resolution rule;
+- abstention conditions;
+- expiry time;
+- eventual outcome and scoring method.
+
+### Work
+
+- Separate prediction issuance from intervention choice.
+- Resolve predictions only from later observations.
+- Add deterministic replay from event logs.
+- Evaluate calibration, Brier score, log loss, coverage, and abstention quality.
+- Compare against simple baselines:
+  - previous-state persistence;
+  - majority class;
+  - recency heuristic;
+  - no-personalization model.
+- Remove retry loops that raise confidence without evidence.
+
+### Exit gate
+
+- Every scored prediction can be replayed from recorded eligible evidence.
+- No code path self-labels a prediction correct because a response was produced.
+- Calibration beats at least one declared baseline on held-out synthetic fixtures before human claims are made.
+
+---
+
+## Phase 4 — Independent SANDBOX SIM and response policy
+
+### Goals
+
+Make SANDBOX SIM an independent policy evaluator rather than a confidence threshold with duplicated inputs.
+
+### Work
+
+- Generate multiple candidate interventions.
+- Evaluate candidates with features not identical to the proposal mechanism.
+- Include explicit costs:
+  - interruption;
+  - overconfidence;
+  - emotional mismatch;
+  - unnecessary personalization;
+  - privacy exposure;
+  - action risk.
+- Add abstain and ask-clarifying-question candidates.
+- Use counterfactual replay fixtures.
+- Compare:
+  - no sandbox;
+  - current heuristic sandbox;
+  - independent evaluator;
+  - randomized candidate selection.
+
+### Exit gate
+
+- Evaluator improves held-out policy utility over no-sandbox and confidence-only baselines.
+- Ablations identify which signals provide benefit.
+- Failure cases are reported, not hidden by aggregate accuracy.
+
+---
+
+## Phase 5 — Emotional state and presencing
+
+### Goals
+
+Test whether presencing improves interaction quality without manipulating attachment.
+
+### Work
+
+- Separate observed cues from inferred emotional state.
+- Represent uncertainty in valence, arousal, stress, and emotional charge.
+- Make presencing a candidate policy, not a hard-coded moral truth.
+- Add user preference controls for directness, acknowledgment, pacing, and silence.
+- Evaluate false-positive presencing and unwanted emotional inference.
+- Add crisis-safe behavior boundaries without claiming diagnosis.
+
+### Exit gate
+
+- Presencing improves user-rated appropriateness over matched controls.
+- False-positive and false-negative rates are reported.
+- Users can inspect and disable emotional adaptation.
+- No metric rewards longer engagement for its own sake.
+
+---
+
+## Phase 6 — Julia-native model baseline
+
+### Goals
+
+Produce a trained, reproducible Julia-native baseline before developing novel architecture claims.
+
+### Work
+
+- Repair and specify tokenizer behavior.
+- Establish a conventional small transformer control model.
+- Add training data manifests and checkpoint provenance.
+- Implement training/evaluation scripts in Julia where practical.
+- Validate gradients or explicitly separate inference-only kernels.
+- Add numerical tests for layer normalization, masking, sampling, and weight loading.
+- Benchmark against a similarly sized external local model.
+
+### Required metrics
+
+- held-out cross entropy/perplexity;
+- generation quality on fixed prompts;
+- tokens per second;
+- first-token latency;
+- peak resident memory;
+- checkpoint size;
+- deterministic reproducibility where configured;
+- numerical error against reference implementations.
+
+### Exit gate
+
+- A documented checkpoint can be reproduced or independently verified.
+- Results beat random and trivial baselines.
+- The model is never selected as the default backend merely because it is Julia-native.
+
+---
+
+## Phase 7 — Linguist-LSA research program
+
+### Goals
+
+Test the proposed selective-state-space and linear-merge architecture against the conventional transformer baseline.
+
+### Research tracks
+
+1. **Selective SSM memory**
+   - long-context synthetic recall;
+   - state stability;
+   - update complexity;
+   - reset and contamination behavior.
+
+2. **Linear-merge attention**
+   - approximation error against causal attention;
+   - constant-memory claim verification;
+   - latency crossover points;
+   - degradation on retrieval and induction tasks.
+
+3. **Low-rank SwiGLU**
+   - parameter and activation savings;
+   - quality loss by rank;
+   - rank adaptation by layer.
+
+4. **Integer-oriented inference**
+   - explicit quantization scales and zero points;
+   - saturation behavior;
+   - SIMD kernel benchmarks;
+   - accuracy loss by operator and bit width.
+
+### Exit gate
+
+- Each novel operator has a reference implementation, optimized implementation, and ablation.
+- Memory and speed claims are measured on target hardware.
+- Quality is compared at matched parameter count and matched compute.
+- Negative results remain in the research record.
+
+---
+
+## Phase 8 — Deployment and device feasibility
+
+### Goals
+
+Package the Julia runtime responsibly and determine which device targets are real.
+
+### Work
+
+- Build reproducible native application images.
+- Measure cold start, sysimage size, and package latency.
+- Test CPU architectures separately.
+- Prototype mobile embedding before promising WASM.
+- Evaluate whether selected kernels require C/LLVM extensions while retaining Julia ownership of orchestration.
+- Add signed model manifests and checksums.
+- Add backup, recovery, and storage-quota behavior.
+
+### Exit gate
+
+- A release artifact boots and passes health checks on declared hardware.
+- Model and database paths are configurable.
+- No runtime download is unpinned or unverified.
+- Mobile claims name an actual tested device and artifact.
+
+---
+
+## Phase 9 — Longitudinal product research
+
+### Goals
+
+Determine whether IngExuity provides durable value without manipulative attachment design.
+
+### Study design
+
+- staged synthetic and internal tests;
+- consenting short human sessions;
+- longitudinal opt-in pilot;
+- clear data deletion and export;
+- comparison against non-personalized and memory-only baselines.
+
+### Primary outcomes
+
+- task success;
+- correction burden;
+- prediction calibration;
+- user-rated appropriateness;
+- unwanted personalization rate;
+- memory intrusion rate;
+- trust calibration;
+- retention only as a secondary descriptive measure.
+
+### Prohibited success criteria
+
+- guilt about turning the system off;
+- exclusivity from human relationships;
+- increased dependence;
+- conversation length without demonstrated benefit.
+
+---
+
+## Immediate PR sequence
+
+1. `julia-everywhere/phase-0`: repository truth, package metadata, Julia CI, native-model smoke tests.
+2. `julia-everywhere/session-runtime`: explicit sessions and transactional turns.
+3. `julia-everywhere/persistence`: SQLite events, snapshots, provenance, correction/deletion.
+4. `julia-everywhere/prediction-ledger`: issue/resolve/replay/scoring contracts.
+5. `julia-everywhere/sandbox-policy`: independent candidate evaluation.
+6. `julia-everywhere/model-baseline`: trained Julia transformer control.
+7. `julia-everywhere/linguist-lsa`: novel operator experiments behind benchmarks.
+
+## Definition of a robust Julia-everywhere release
+
+A release is robust only when:
+
+- clean installation and tests pass;
+- state is isolated and durable;
+- predictions are externally resolvable and replayable;
+- user model claims are inspectable, correctable, and deletable;
+- inference backends have conformance tests;
+- model artifacts have provenance and checksums;
+- claimed performance is measured;
+- safety and privacy boundaries are explicit;
+- unsupported research targets are labeled as such.
