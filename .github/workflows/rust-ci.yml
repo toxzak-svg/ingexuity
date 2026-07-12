@@ -58,9 +58,9 @@ jobs:
 
       - name: Start model-free server
         id: smoke
-        if: ${{ always() && steps.build.outcome == 'success' }}
         continue-on-error: true
         run: |
+          test -x target/release/ingexuity-server
           target/release/ingexuity-server > ci-artifacts/server.log 2>&1 &
           echo $! > /tmp/ingexuity.pid
           for attempt in $(seq 1 30); do
@@ -74,7 +74,6 @@ jobs:
 
       - name: Verify health contract
         id: health
-        if: ${{ always() && steps.smoke.outcome == 'success' }}
         continue-on-error: true
         run: |
           python3 - <<'PY'
@@ -118,19 +117,44 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Create diagnostics directory
+        run: mkdir -p ci-artifacts
+
       - name: Build model-free image
-        run: docker build --tag ingexuity:ci .
+        id: docker_build
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          docker build --progress=plain --tag ingexuity:ci . 2>&1 | tee ci-artifacts/docker-build.log
 
       - name: Smoke test container
+        id: docker_smoke
+        continue-on-error: true
         run: |
+          docker image inspect ingexuity:ci >/dev/null
           docker run --detach --rm --name ingexuity-ci -p 8000:8000 ingexuity:ci
           for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:8000/health > /tmp/container-health.json; then
+            if curl --fail --silent http://127.0.0.1:8000/health > ci-artifacts/container-health.json; then
               docker stop ingexuity-ci
               exit 0
             fi
             sleep 1
           done
-          docker logs ingexuity-ci
+          docker logs ingexuity-ci | tee ci-artifacts/container.log
           docker stop ingexuity-ci || true
           exit 1
+
+      - name: Upload container diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-diagnostics
+          if-no-files-found: warn
+          path: ci-artifacts/**
+
+      - name: Enforce container outcomes
+        if: always()
+        run: |
+          test "${{ steps.docker_build.outcome }}" = success
+          test "${{ steps.docker_smoke.outcome }}" = success
