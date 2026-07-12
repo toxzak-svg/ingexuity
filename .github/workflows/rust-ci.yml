@@ -21,23 +21,20 @@ jobs:
           toolchain: 1.97.0
           components: rustfmt
 
-      - name: Add explicit API mapping
+      - name: Insert explicit API mapping
         run: |
           python3 - <<'PY'
           from pathlib import Path
           path = Path('crates/ingexuity-server/src/lib.rs')
           source = path.read_text(encoding='utf-8')
-          anchor = '''            Self::Core(CoreError::MessageTooLarge) => {
-                      (StatusCode::PAYLOAD_TOO_LARGE, "message_too_large")
-                  }
-          '''.replace('                  ', '')
-          replacement = anchor + '''            Self::Core(CoreError::VersionOverflow) => {
-                      (StatusCode::INTERNAL_SERVER_ERROR, "state_version_overflow")
-                  }
-          '''.replace('                  ', '')
+          anchor = '            Self::Core(CoreError::Inference(_)) => {'
+          inserted = '''            Self::Core(CoreError::VersionOverflow) => {
+              (StatusCode::INTERNAL_SERVER_ERROR, "state_version_overflow")
+          }
+'''
           if source.count(anchor) != 1:
-              raise SystemExit(f'error mapping anchor count: {source.count(anchor)}')
-          path.write_text(source.replace(anchor, replacement, 1), encoding='utf-8')
+              raise SystemExit(f'inference arm count: {source.count(anchor)}')
+          path.write_text(source.replace(anchor, inserted + anchor, 1), encoding='utf-8')
           PY
           cargo fmt --all
 
