@@ -22,19 +22,10 @@ jobs:
 
           path = Path('crates/ingexuity-server/src/lib.rs')
           source = path.read_text(encoding='utf-8')
-          old = '''    pub async fn snapshot(&self, id: SessionId) -> Option<ConversationState> {
-              let session = self.get(id).await?;
-              Some(session.lock().await.clone())
-          }
-          '''.replace('          ', '')
-          new = '''    pub async fn snapshot(&self, id: SessionId) -> Option<ConversationState> {
-              let session = self.get(id).await?;
-              let snapshot = session.lock().await.clone();
-              Some(snapshot)
-          }
-          '''.replace('          ', '')
-          if old not in source:
-              raise SystemExit('expected snapshot implementation was not found')
+          old = '        Some(session.lock().await.clone())'
+          new = '        let snapshot = session.lock().await.clone();\n        Some(snapshot)'
+          if source.count(old) != 1:
+              raise SystemExit(f'expected one snapshot expression, found {source.count(old)}')
           path.write_text(source.replace(old, new, 1), encoding='utf-8')
           PY
 
