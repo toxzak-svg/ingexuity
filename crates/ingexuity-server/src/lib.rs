@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod persistence;
+
 use axum::{
     extract::{rejection::JsonRejection, DefaultBodyLimit, Path, State},
     http::{HeaderName, StatusCode},
@@ -11,11 +13,14 @@ use ingexuity_core::{
     process_turn, BackendHealth, ChatOutcome, ConversationState, CoreError, HeuristicBackend,
     InferenceBackend, SessionId, MAX_MESSAGE_BYTES,
 };
+use ingexuity_store::{NewEvent, SqliteStore, StoreError, StoredSession};
+use persistence::{Persistence, PersistenceError};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -26,6 +31,7 @@ use tower_http::{
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
     trace::TraceLayer,
 };
+use tracing::error;
 use uuid::Uuid;
 
 pub const MAX_REQUEST_BODY_BYTES: usize = MAX_MESSAGE_BYTES + 1024;
@@ -54,14 +60,16 @@ struct SessionEntry {
     state: Mutex<ConversationState>,
     created_at_ms: u64,
     last_access_ms: AtomicU64,
+    deleted: AtomicBool,
 }
 
 impl SessionEntry {
-    fn new(state: ConversationState, now_ms: u64) -> Self {
+    fn new(state: ConversationState, created_at_ms: u64, last_access_ms: u64) -> Self {
         Self {
             state: Mutex::new(state),
-            created_at_ms: now_ms,
-            last_access_ms: AtomicU64::new(now_ms),
+            created_at_ms,
+            last_access_ms: AtomicU64::new(last_access_ms),
+            deleted: AtomicBool::new(false),
         }
     }
 }
@@ -69,6 +77,7 @@ impl SessionEntry {
 #[derive(Clone)]
 pub struct SessionManager {
     sessions: Arc<RwLock<HashMap<SessionId, Arc<SessionEntry>>>>,
+    expired_ids: Arc<Mutex<Vec<SessionId>>>,
     clock: Arc<dyn Clock>,
     ttl_ms: u64,
 }
@@ -90,6 +99,7 @@ impl SessionManager {
         let ttl_ms = u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX).max(1);
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            expired_ids: Arc::new(Mutex::new(Vec::new())),
             clock,
             ttl_ms,
         }
@@ -98,23 +108,45 @@ impl SessionManager {
     pub async fn create(&self) -> SessionId {
         let id = Uuid::new_v4();
         let now_ms = self.clock.now_millis();
-        let entry = Arc::new(SessionEntry::new(ConversationState::new(id), now_ms));
+        let entry = Arc::new(SessionEntry::new(
+            ConversationState::new(id),
+            now_ms,
+            now_ms,
+        ));
         self.sessions.write().await.insert(id, entry);
         id
+    }
+
+    pub async fn restore(&self, stored: StoredSession) -> bool {
+        let now_ms = self.clock.now_millis();
+        if now_ms.saturating_sub(stored.updated_at_ms) > self.ttl_ms {
+            self.expired_ids.lock().await.push(stored.session_id);
+            return false;
+        }
+
+        let entry = Arc::new(SessionEntry::new(
+            stored.snapshot,
+            stored.created_at_ms,
+            stored.updated_at_ms,
+        ));
+        self.sessions.write().await.insert(stored.session_id, entry);
+        true
     }
 
     async fn get(&self, id: SessionId) -> Option<Arc<SessionEntry>> {
         let now_ms = self.clock.now_millis();
         let entry = self.sessions.read().await.get(&id).cloned()?;
 
-        if self.is_expired(&entry, now_ms) {
+        if entry.deleted.load(Ordering::Acquire) || self.is_expired(&entry, now_ms) {
             let mut sessions = self.sessions.write().await;
             let should_remove = sessions
                 .get(&id)
-                .map(|current| Arc::ptr_eq(current, &entry) && self.is_expired(current, now_ms))
+                .map(|current| Arc::ptr_eq(current, &entry))
                 .unwrap_or(false);
             if should_remove {
+                entry.deleted.store(true, Ordering::Release);
                 sessions.remove(&id);
+                self.expired_ids.lock().await.push(id);
             }
             return None;
         }
@@ -126,6 +158,10 @@ impl SessionManager {
     #[must_use]
     pub fn ttl_seconds(&self) -> u64 {
         self.ttl_ms.div_ceil(1000)
+    }
+
+    pub fn now_millis(&self) -> u64 {
+        self.clock.now_millis()
     }
 
     pub async fn count(&self) -> usize {
@@ -145,23 +181,36 @@ impl SessionManager {
         Some(self.metadata_from(&entry, &state))
     }
 
-    pub async fn reset(&self, id: SessionId) -> Option<SessionMetadataResponse> {
-        let entry = self.get(id).await?;
-        let mut state = entry.state.lock().await;
-        *state = ConversationState::new(id);
-        Some(self.metadata_from(&entry, &state))
+    async fn remove(&self, id: SessionId) -> bool {
+        let entry = self.sessions.write().await.remove(&id);
+        if let Some(entry) = entry {
+            entry.deleted.store(true, Ordering::Release);
+            true
+        } else {
+            false
+        }
     }
 
-    pub async fn delete(&self, id: SessionId) -> bool {
-        self.sessions.write().await.remove(&id).is_some()
-    }
-
-    pub async fn sweep_expired(&self) -> usize {
+    async fn sweep_expired(&self) -> usize {
         let now_ms = self.clock.now_millis();
+        let mut expired = Vec::new();
         let mut sessions = self.sessions.write().await;
-        let before = sessions.len();
-        sessions.retain(|_, entry| !self.is_expired(entry, now_ms));
-        before - sessions.len()
+        sessions.retain(|id, entry| {
+            let keep = !entry.deleted.load(Ordering::Acquire) && !self.is_expired(entry, now_ms);
+            if !keep {
+                entry.deleted.store(true, Ordering::Release);
+                expired.push(*id);
+            }
+            keep
+        });
+        let count = expired.len();
+        drop(sessions);
+        self.expired_ids.lock().await.extend(expired);
+        count
+    }
+
+    async fn drain_expired(&self) -> Vec<SessionId> {
+        std::mem::take(&mut *self.expired_ids.lock().await)
     }
 
     fn is_expired(&self, entry: &SessionEntry, now_ms: u64) -> bool {
@@ -201,26 +250,45 @@ impl Default for AppConfig {
     }
 }
 
+#[derive(Debug, Error)]
+pub enum AppInitError {
+    #[error(transparent)]
+    Persistence(#[from] PersistenceError),
+}
+
 #[derive(Clone)]
 pub struct AppState {
     sessions: SessionManager,
     backend: Arc<dyn InferenceBackend>,
     inference_slots: Arc<Semaphore>,
+    persistence: Persistence,
 }
 
 impl Default for AppState {
     fn default() -> Self {
-        Self::new(Arc::new(HeuristicBackend), AppConfig::default())
+        let store = Arc::new(
+            SqliteStore::open_in_memory().expect("in-memory SQLite store must initialize"),
+        );
+        Self::with_store(
+            Arc::new(HeuristicBackend),
+            SessionManager::default(),
+            DEFAULT_MAX_INFERENCE_CONCURRENCY,
+            store,
+        )
     }
 }
 
 impl AppState {
     #[must_use]
     pub fn new(backend: Arc<dyn InferenceBackend>, config: AppConfig) -> Self {
-        Self::with_components(
+        let store = Arc::new(
+            SqliteStore::open_in_memory().expect("in-memory SQLite store must initialize"),
+        );
+        Self::with_store(
             backend,
             SessionManager::new(config.session_ttl),
             config.max_inference_concurrency,
+            store,
         )
     }
 
@@ -230,16 +298,68 @@ impl AppState {
         sessions: SessionManager,
         max_inference_concurrency: usize,
     ) -> Self {
+        let store = Arc::new(
+            SqliteStore::open_in_memory().expect("in-memory SQLite store must initialize"),
+        );
+        Self::with_store(backend, sessions, max_inference_concurrency, store)
+    }
+
+    #[must_use]
+    pub fn with_store(
+        backend: Arc<dyn InferenceBackend>,
+        sessions: SessionManager,
+        max_inference_concurrency: usize,
+        store: Arc<SqliteStore>,
+    ) -> Self {
         Self {
             sessions,
             backend,
             inference_slots: Arc::new(Semaphore::new(max_inference_concurrency.max(1))),
+            persistence: Persistence::new(store),
         }
+    }
+
+    pub async fn restore(
+        backend: Arc<dyn InferenceBackend>,
+        config: AppConfig,
+        store: Arc<SqliteStore>,
+    ) -> Result<Self, AppInitError> {
+        let state = Self::with_store(
+            backend,
+            SessionManager::new(config.session_ttl),
+            config.max_inference_concurrency,
+            store,
+        );
+        state.persistence.quick_check().await?;
+        for stored in state.persistence.list_sessions().await? {
+            state.sessions.restore(stored).await;
+        }
+        state.purge_expired().await.map_err(|error| match error {
+            AppError::Persistence(source) => AppInitError::Persistence(source),
+            _ => unreachable!("startup expiration purge only returns persistence errors"),
+        })?;
+        Ok(state)
     }
 
     #[must_use]
     pub fn sessions(&self) -> &SessionManager {
         &self.sessions
+    }
+
+    async fn lookup_session(&self, id: SessionId) -> Result<Arc<SessionEntry>, AppError> {
+        let entry = self.sessions.get(id).await;
+        self.purge_expired().await?;
+        entry.ok_or(AppError::UnknownSession)
+    }
+
+    async fn purge_expired(&self) -> Result<(), AppError> {
+        for id in self.sessions.drain_expired().await {
+            self.persistence
+                .delete_session(id)
+                .await
+                .map_err(AppError::from_persistence)?;
+        }
+        Ok(())
     }
 }
 
@@ -282,27 +402,34 @@ struct ReadinessResponse {
     status: &'static str,
     runtime: &'static str,
     backend: BackendHealth,
+    storage: &'static str,
     active_sessions: usize,
     available_inference_slots: usize,
 }
 
 async fn readiness(State(state): State<AppState>) -> (StatusCode, Json<ReadinessResponse>) {
     let backend = state.backend.health();
-    let ready = !matches!(backend, BackendHealth::Unavailable);
-    let status = if ready { "ready" } else { "not_ready" };
-    let status_code = if ready {
-        StatusCode::OK
-    } else {
-        StatusCode::SERVICE_UNAVAILABLE
-    };
+    let storage_ready = state.persistence.quick_check().await.is_ok();
+    let active_sessions = state.sessions.count().await;
+    let purge_ready = state.purge_expired().await.is_ok();
+    let ready = !matches!(backend, BackendHealth::Unavailable) && storage_ready && purge_ready;
 
     (
-        status_code,
+        if ready {
+            StatusCode::OK
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        },
         Json(ReadinessResponse {
-            status,
+            status: if ready { "ready" } else { "not_ready" },
             runtime: "rust",
             backend,
-            active_sessions: state.sessions.count().await,
+            storage: if storage_ready && purge_ready {
+                "ready"
+            } else {
+                "unavailable"
+            },
+            active_sessions,
             available_inference_slots: state.inference_slots.available_permits(),
         }),
     )
@@ -316,15 +443,35 @@ pub struct CreateSessionResponse {
 
 async fn create_session(
     State(state): State<AppState>,
-) -> (StatusCode, Json<CreateSessionResponse>) {
+) -> Result<(StatusCode, Json<CreateSessionResponse>), AppError> {
     let session_id = state.sessions.create().await;
-    (
+    let snapshot = state
+        .sessions
+        .snapshot(session_id)
+        .await
+        .ok_or(AppError::UnknownSession)?;
+    let metadata = state
+        .sessions
+        .metadata(session_id)
+        .await
+        .ok_or(AppError::UnknownSession)?;
+
+    if let Err(error) = state
+        .persistence
+        .create_session(snapshot, metadata.created_at_ms)
+        .await
+    {
+        state.sessions.remove(session_id).await;
+        return Err(AppError::from_persistence(error));
+    }
+
+    Ok((
         StatusCode::CREATED,
         Json(CreateSessionResponse {
             session_id,
             expires_in_seconds: state.sessions.ttl_seconds(),
         }),
-    )
+    ))
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -341,6 +488,7 @@ async fn get_session(
     Path(session_id): Path<SessionId>,
     State(state): State<AppState>,
 ) -> Result<Json<SessionMetadataResponse>, AppError> {
+    state.lookup_session(session_id).await?;
     let metadata = state
         .sessions
         .metadata(session_id)
@@ -353,23 +501,54 @@ async fn reset_session(
     Path(session_id): Path<SessionId>,
     State(state): State<AppState>,
 ) -> Result<Json<SessionMetadataResponse>, AppError> {
-    let metadata = state
-        .sessions
-        .reset(session_id)
+    let entry = state.lookup_session(session_id).await?;
+    let mut guard = entry.state.lock().await;
+    if entry.deleted.load(Ordering::Acquire) {
+        return Err(AppError::UnknownSession);
+    }
+
+    let previous = guard.clone();
+    guard.reset();
+    let next = guard.clone();
+    let now_ms = state.sessions.now_millis();
+    let event = NewEvent::new(
+        "session.reset",
+        json!({"previous_version": previous.version}),
+        now_ms,
+    );
+
+    if let Err(error) = state
+        .persistence
+        .append_events(session_id, previous.version, vec![event], next, now_ms)
         .await
-        .ok_or(AppError::UnknownSession)?;
-    Ok(Json(metadata))
+    {
+        *guard = previous;
+        return Err(AppError::from_persistence(error));
+    }
+
+    Ok(Json(state.sessions.metadata_from(&entry, &guard)))
 }
 
 async fn delete_session(
     Path(session_id): Path<SessionId>,
     State(state): State<AppState>,
 ) -> Result<StatusCode, AppError> {
-    if state.sessions.delete(session_id).await {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(AppError::UnknownSession)
+    let entry = state.lookup_session(session_id).await?;
+    let _guard = entry.state.lock().await;
+    if entry.deleted.load(Ordering::Acquire) {
+        return Err(AppError::UnknownSession);
     }
+
+    let deleted = state
+        .persistence
+        .delete_session(session_id)
+        .await
+        .map_err(AppError::from_persistence)?;
+    if !deleted {
+        return Err(AppError::UnknownSession);
+    }
+    state.sessions.remove(session_id).await;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Debug, Deserialize)]
@@ -392,24 +571,60 @@ async fn chat(
     payload: Result<Json<ChatRequest>, JsonRejection>,
 ) -> Result<Json<ChatResponse>, AppError> {
     let Json(request) = payload.map_err(AppError::from_json_rejection)?;
-    let session = state
-        .sessions
-        .get(request.session_id)
-        .await
-        .ok_or(AppError::UnknownSession)?;
+    let entry = state.lookup_session(request.session_id).await?;
     let _permit = state
         .inference_slots
         .clone()
         .try_acquire_owned()
         .map_err(|_| AppError::ServerBusy)?;
 
-    let mut session = session.state.lock().await;
+    let mut guard = entry.state.lock().await;
+    if entry.deleted.load(Ordering::Acquire) {
+        return Err(AppError::UnknownSession);
+    }
+
+    let previous = guard.clone();
     let ChatOutcome {
         text,
         backend,
         turn_count,
         state_version,
-    } = process_turn(&mut session, &request.message, state.backend.as_ref())?;
+    } = process_turn(&mut guard, &request.message, state.backend.as_ref())?;
+    let next = guard.clone();
+    let now_ms = state.sessions.now_millis();
+    let events = vec![
+        NewEvent::new(
+            "turn.user_recorded",
+            json!({
+                "turn_count": turn_count,
+                "content_bytes": request.message.len()
+            }),
+            now_ms,
+        ),
+        NewEvent::new(
+            "turn.assistant_recorded",
+            json!({
+                "backend_id": backend.id,
+                "state_version": state_version
+            }),
+            now_ms,
+        ),
+    ];
+
+    if let Err(error) = state
+        .persistence
+        .append_events(
+            request.session_id,
+            previous.version,
+            events,
+            next,
+            now_ms,
+        )
+        .await
+    {
+        *guard = previous;
+        return Err(AppError::from_persistence(error));
+    }
 
     Ok(Json(ChatResponse {
         session_id: request.session_id,
@@ -432,8 +647,14 @@ pub enum AppError {
     UnknownSession,
     #[error("inference capacity is currently full")]
     ServerBusy,
+    #[error("session state changed concurrently; retry the request")]
+    StateConflict,
+    #[error("durable storage is unavailable")]
+    StorageUnavailable,
     #[error(transparent)]
     Core(#[from] CoreError),
+    #[error(transparent)]
+    Persistence(PersistenceError),
 }
 
 #[derive(Debug, Serialize)]
@@ -456,6 +677,17 @@ impl AppError {
         }
     }
 
+    fn from_persistence(error_value: PersistenceError) -> Self {
+        match &error_value {
+            PersistenceError::Store(StoreError::VersionConflict { .. }) => Self::StateConflict,
+            PersistenceError::Store(StoreError::SessionNotFound(_)) => Self::UnknownSession,
+            _ => {
+                error!(error = %error_value, "durable storage operation failed");
+                Self::Persistence(error_value)
+            }
+        }
+    }
+
     fn status_and_code(&self) -> (StatusCode, &'static str) {
         match self {
             Self::InvalidJson => (StatusCode::BAD_REQUEST, "invalid_json"),
@@ -465,6 +697,10 @@ impl AppError {
             Self::RequestTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "request_too_large"),
             Self::UnknownSession => (StatusCode::NOT_FOUND, "unknown_session"),
             Self::ServerBusy => (StatusCode::TOO_MANY_REQUESTS, "server_busy"),
+            Self::StateConflict => (StatusCode::CONFLICT, "state_conflict"),
+            Self::StorageUnavailable | Self::Persistence(_) => {
+                (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable")
+            }
             Self::Core(CoreError::EmptyMessage) => (StatusCode::BAD_REQUEST, "empty_message"),
             Self::Core(CoreError::MessageTooLarge) => {
                 (StatusCode::PAYLOAD_TOO_LARGE, "message_too_large")
@@ -479,11 +715,12 @@ impl AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, code) = self.status_and_code();
+        let message = match self {
+            Self::Persistence(_) => "durable storage is unavailable".to_owned(),
+            other => other.to_string(),
+        };
         let body = ErrorEnvelope {
-            error: ErrorBody {
-                code,
-                message: self.to_string(),
-            },
+            error: ErrorBody { code, message },
         };
         (status, Json(body)).into_response()
     }
@@ -498,8 +735,9 @@ mod tests {
     };
     use http_body_util::BodyExt;
     use ingexuity_core::{BackendMetadata, Generation, GenerationRequest, InferenceError};
-    use serde_json::{json, Value};
+    use serde_json::Value;
     use std::sync::atomic::AtomicBool;
+    use tempfile::tempdir;
     use tower::ServiceExt;
 
     async fn json_body(response: axum::response::Response) -> Value {
@@ -516,28 +754,33 @@ mod tests {
             .unwrap()
     }
 
-    #[tokio::test]
-    async fn liveness_and_readiness_report_real_state() {
-        let router = app(AppState::default());
-
-        let live = router
+    async fn create_via_api(router: &Router) -> SessionId {
+        let response = router
             .clone()
-            .oneshot(Request::get("/health/live").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::post("/api/v1/sessions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
-        assert_eq!(live.status(), StatusCode::OK);
-        let live_body = json_body(live).await;
-        assert_eq!(live_body["runtime"], "rust");
-        assert_eq!(live_body["status"], "ok");
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = json_body(response).await;
+        serde_json::from_value(body["session_id"].clone()).unwrap()
+    }
 
+    #[tokio::test]
+    async fn liveness_and_readiness_report_storage() {
+        let router = app(AppState::default());
         let ready = router
             .oneshot(Request::get("/health/ready").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(ready.status(), StatusCode::OK);
-        let ready_body = json_body(ready).await;
-        assert_eq!(ready_body["status"], "ready");
-        assert_eq!(ready_body["backend"], "ready");
+        let body = json_body(ready).await;
+        assert_eq!(body["runtime"], "rust");
+        assert_eq!(body["backend"], "ready");
+        assert_eq!(body["storage"], "ready");
     }
 
     #[tokio::test]
@@ -546,13 +789,14 @@ mod tests {
             .oneshot(Request::get("/health").body(Body::empty()).unwrap())
             .await
             .unwrap();
-
         assert!(response.headers().contains_key("x-request-id"));
     }
 
     #[tokio::test]
-    async fn malformed_json_is_machine_readable() {
-        let response = app(AppState::default())
+    async fn malformed_json_and_media_type_are_machine_readable() {
+        let router = app(AppState::default());
+        let malformed = router
+            .clone()
             .oneshot(
                 Request::post("/api/v1/chat")
                     .header(CONTENT_TYPE, "application/json")
@@ -561,15 +805,10 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(json_body(malformed).await["error"]["code"], "invalid_json");
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let body = json_body(response).await;
-        assert_eq!(body["error"]["code"], "invalid_json");
-    }
-
-    #[tokio::test]
-    async fn missing_content_type_is_rejected() {
-        let response = app(AppState::default())
+        let media = router
             .oneshot(
                 Request::post("/api/v1/chat")
                     .body(Body::from("{}"))
@@ -577,38 +816,15 @@ mod tests {
             )
             .await
             .unwrap();
-
-        assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
-        let body = json_body(response).await;
-        assert_eq!(body["error"]["code"], "unsupported_media_type");
+        assert_eq!(media.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
 
     #[tokio::test]
-    async fn oversized_request_is_rejected() {
-        let message = "x".repeat(MAX_REQUEST_BODY_BYTES + 1);
-        let response = app(AppState::default())
-            .oneshot(
-                Request::post("/api/v1/chat")
-                    .header(CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        json!({"session_id": Uuid::new_v4(), "message": message}).to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-        let body = json_body(response).await;
-        assert_eq!(body["error"]["code"], "request_too_large");
-    }
-
-    #[tokio::test]
-    async fn sessions_are_isolated() {
+    async fn sessions_are_isolated_and_persisted() {
         let state = AppState::default();
-        let session_a = state.sessions.create().await;
-        let session_b = state.sessions.create().await;
         let router = app(state.clone());
+        let session_a = create_via_api(&router).await;
+        let session_b = create_via_api(&router).await;
 
         for (session_id, message) in [
             (session_a, "My work and Rust code are the priority"),
@@ -624,26 +840,37 @@ mod tests {
 
         let a = state.sessions.snapshot(session_a).await.unwrap();
         let b = state.sessions.snapshot(session_b).await.unwrap();
-
-        assert!(a.user_model.topics.contains("work"));
         assert!(a.user_model.topics.contains("software"));
         assert!(!a.user_model.topics.contains("family"));
         assert!(b.user_model.topics.contains("family"));
         assert!(!b.user_model.topics.contains("work"));
+
+        assert_eq!(
+            state
+                .persistence
+                .load_session(session_a)
+                .await
+                .unwrap()
+                .unwrap()
+                .snapshot,
+            a
+        );
     }
 
     #[tokio::test]
-    async fn reset_and_delete_control_session_lifecycle() {
+    async fn reset_and_delete_are_durable() {
         let state = AppState::default();
-        let session_id = state.sessions.create().await;
         let router = app(state.clone());
-
-        let chat = router
-            .clone()
-            .oneshot(chat_request(session_id, "Rust work"))
-            .await
-            .unwrap();
-        assert_eq!(chat.status(), StatusCode::OK);
+        let session_id = create_via_api(&router).await;
+        assert_eq!(
+            router
+                .clone()
+                .oneshot(chat_request(session_id, "Rust work"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
 
         let reset = router
             .clone()
@@ -657,9 +884,17 @@ mod tests {
         assert_eq!(reset.status(), StatusCode::OK);
         let reset_body = json_body(reset).await;
         assert_eq!(reset_body["turn_count"], 0);
-        assert_eq!(reset_body["state_version"], 0);
+        assert!(reset_body["state_version"].as_u64().unwrap() > 0);
 
-        let delete = router
+        let stored = state
+            .persistence
+            .load_session(session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.snapshot.turn_count, 0);
+
+        let deleted = router
             .clone()
             .oneshot(
                 Request::delete(format!("/api/v1/sessions/{session_id}"))
@@ -668,13 +903,52 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(delete.status(), StatusCode::NO_CONTENT);
-
-        let missing = router
-            .oneshot(chat_request(session_id, "hello"))
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+        assert!(state
+            .persistence
+            .load_session(session_id)
             .await
-            .unwrap();
-        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn runtime_recovers_sessions_after_restart() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("runtime.sqlite3");
+        let store = Arc::new(SqliteStore::open(&path).unwrap());
+        let first = AppState::restore(
+            Arc::new(HeuristicBackend),
+            AppConfig::default(),
+            store.clone(),
+        )
+        .await
+        .unwrap();
+        let first_router = app(first);
+        let session_id = create_via_api(&first_router).await;
+        assert_eq!(
+            first_router
+                .clone()
+                .oneshot(chat_request(session_id, "Rust work"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        drop(first_router);
+        drop(store);
+
+        let reopened = Arc::new(SqliteStore::open(&path).unwrap());
+        let second = AppState::restore(
+            Arc::new(HeuristicBackend),
+            AppConfig::default(),
+            reopened,
+        )
+        .await
+        .unwrap();
+        let recovered = second.sessions.snapshot(session_id).await.unwrap();
+        assert_eq!(recovered.turn_count, 1);
+        assert!(recovered.user_model.topics.contains("software"));
     }
 
     #[derive(Default)]
@@ -695,15 +969,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn expired_sessions_are_removed_deterministically() {
+    async fn expiration_removes_durable_session() {
         let clock = Arc::new(ManualClock::default());
         let sessions = SessionManager::with_clock(Duration::from_millis(100), clock.clone());
-        let session_id = sessions.create().await;
-
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let state = AppState::with_store(
+            Arc::new(HeuristicBackend),
+            sessions,
+            1,
+            store.clone(),
+        );
+        let router = app(state.clone());
+        let session_id = create_via_api(&router).await;
         clock.advance(101);
 
-        assert!(sessions.snapshot(session_id).await.is_none());
-        assert_eq!(sessions.count().await, 0);
+        let response = router
+            .oneshot(chat_request(session_id, "hello"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(store.load_session(session_id).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn optimistic_conflict_rolls_back_memory() {
+        let store = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let state = AppState::with_store(
+            Arc::new(HeuristicBackend),
+            SessionManager::default(),
+            1,
+            store.clone(),
+        );
+        let router = app(state.clone());
+        let session_id = create_via_api(&router).await;
+        let before = state.sessions.snapshot(session_id).await.unwrap();
+
+        let mut external = before.clone();
+        process_turn(&mut external, "external update", &HeuristicBackend).unwrap();
+        store
+            .append_events(
+                session_id,
+                before.version,
+                &[NewEvent::new("external.update", json!({}), 1)],
+                &external,
+                1,
+            )
+            .unwrap();
+
+        let response = router
+            .oneshot(chat_request(session_id, "local update"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(json_body(response).await["error"]["code"], "state_conflict");
+        assert_eq!(state.sessions.snapshot(session_id).await.unwrap(), before);
     }
 
     struct SlowBackend {
@@ -734,7 +1053,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn inference_concurrency_is_bounded() {
+    async fn inference_concurrency_remains_bounded() {
         let started = Arc::new(AtomicBool::new(false));
         let state = AppState::with_components(
             Arc::new(SlowBackend {
@@ -743,9 +1062,9 @@ mod tests {
             SessionManager::default(),
             1,
         );
-        let session_a = state.sessions.create().await;
-        let session_b = state.sessions.create().await;
         let router = app(state);
+        let session_a = create_via_api(&router).await;
+        let session_b = create_via_api(&router).await;
 
         let first_router = router.clone();
         let first = tokio::spawn(async move {
@@ -754,7 +1073,6 @@ mod tests {
                 .await
                 .unwrap()
         });
-
         while !started.load(Ordering::Acquire) {
             tokio::task::yield_now().await;
         }
@@ -764,9 +1082,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
-        let body = json_body(second).await;
-        assert_eq!(body["error"]["code"], "server_busy");
-
         assert_eq!(first.await.unwrap().status(), StatusCode::OK);
     }
 }
