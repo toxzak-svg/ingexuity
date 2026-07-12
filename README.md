@@ -4,7 +4,7 @@ IngExuity is a local-first companion research project built around explicit user
 
 The production substrate is **Rust**. The existing Julia implementation remains in the repository temporarily as legacy behavioral reference while useful concepts and tests are migrated.
 
-> Current status: Phase 1 API hardening. The server is model-free and deterministic, with isolated expiring sessions, lifecycle controls, bounded inference concurrency, request IDs, and separate liveness/readiness reporting.
+> Current status: Phase 2 durable runtime. Session creation, chat, reset, deletion, expiration, and restart recovery are backed by a versioned SQLite event store. Generation remains model-free and deterministic until the inference boundary is ready.
 
 ## What is active
 
@@ -12,12 +12,13 @@ The production substrate is **Rust**. The existing Julia implementation remains 
 |---|---|---|
 | Rust workspace | **active** | Root Cargo workspace, locked to Rust 1.97 |
 | `ingexuity-core` | **active** | Typed state and transactional turn processing |
-| `ingexuity-server` | **active** | Hardened Axum API with isolated UUID sessions |
-| Session lifecycle | **active** | Sliding expiry, metadata, reset, and deletion |
+| `ingexuity-server` | **active** | Hardened Axum API with durable UUID sessions |
+| `ingexuity-store` | **active** | SQLite migrations, snapshots, ordered events, integrity checks |
+| Session lifecycle | **active** | Persistence, restart recovery, sliding expiry, reset, deletion |
 | Deterministic fallback | **active** | Model-free CI and failure-path backend |
-| Rust CI and container | **active** | Format, Clippy, tests, release build, and live smoke tests |
-| GGUF/llama.cpp backend | planned | Added after backend contracts support cancellation and conformance testing |
-| SQLite event store | planned | Phase 2; current sessions are memory-only |
+| Rust CI and container | **active** | Strict Rust checks and volume-backed restart smoke test |
+| Provenance-aware memory claims | planned | Next Phase 2 slice |
+| GGUF/llama.cpp backend | planned | Added after cancellation and conformance contracts |
 | Prediction ledger/replay | planned | Phase 3 |
 | Independent SANDBOX SIM | planned | Phase 5 |
 | Mobile runtime | research | Requires measured prototypes |
@@ -37,16 +38,17 @@ HTTP request
   -> opaque session lookup and sliding-expiry check
   -> bounded inference permit
   -> per-session lock
-  -> typed ConversationState clone
-  -> pending next-turn prediction issued
-  -> InferenceBackend
+  -> clone committed ConversationState
+  -> issue an unresolved prediction
+  -> run InferenceBackend
        currently: deterministic model-free fallback
-  -> assistant turn appended
-  -> state committed atomically
+  -> append assistant turn
+  -> append typed events + replace SQLite snapshot in one transaction
+  -> commit in-memory state only when persistence succeeds
   -> JSON response with x-request-id
 ```
 
-A failed backend call does not partially mutate session state. Producing a response does not mark a prediction correct. When all inference permits are occupied, the API returns `429 server_busy` rather than accepting unbounded work.
+A failed backend call does not partially mutate session state. A failed SQLite write restores the previous in-memory snapshot. Producing a response does not mark a prediction correct. Optimistic version conflicts return `409 state_conflict` rather than silently overwriting newer state.
 
 ## Run locally
 
@@ -56,11 +58,15 @@ Install Rust 1.97, then:
 cargo run --locked -p ingexuity-server
 ```
 
-The server binds to `0.0.0.0:8000` by default. Override it with:
+The default database is `data/ingexuity.sqlite3`. Override the bind address or database path with:
 
 ```bash
-INGEXUITY_BIND=127.0.0.1:9000 cargo run --locked -p ingexuity-server
+INGEXUITY_BIND=127.0.0.1:9000 \
+INGEXUITY_DB_PATH=/path/to/identity.sqlite3 \
+cargo run --locked -p ingexuity-server
 ```
+
+Startup creates the database parent directory, applies checked-in migrations, runs SQLite integrity checks, and restores non-expired sessions.
 
 ### Liveness and readiness
 
@@ -69,7 +75,7 @@ curl http://127.0.0.1:8000/health/live
 curl http://127.0.0.1:8000/health/ready
 ```
 
-`/health/live` answers whether the Rust process can serve HTTP. `/health/ready` reports the real inference backend state, active in-memory session count, and available inference permits. `/health` remains a liveness alias.
+`/health/live` answers whether the Rust process can serve HTTP. `/health/ready` reports inference capacity and SQLite integrity. `/health` remains a liveness alias.
 
 ### Create a session
 
@@ -77,7 +83,7 @@ curl http://127.0.0.1:8000/health/ready
 curl -X POST http://127.0.0.1:8000/api/v1/sessions
 ```
 
-Sessions use opaque UUIDs and a 30-minute sliding inactivity timeout by default. They are **not durable yet** and disappear when the process restarts.
+Sessions use opaque UUIDs and a 30-minute sliding inactivity timeout by default. Creation is acknowledged only after the initial snapshot is durable.
 
 ### Send a message
 
@@ -97,7 +103,7 @@ curl -X POST http://127.0.0.1:8000/api/v1/sessions/SESSION_UUID/reset
 curl -X DELETE http://127.0.0.1:8000/api/v1/sessions/SESSION_UUID
 ```
 
-Reset clears conversational state while preserving the session identifier. Delete immediately invalidates the identifier.
+Reset clears conversational and personalized state while advancing the durable state version. Delete removes both the snapshot and its event history through a foreign-key cascade.
 
 ## API contract
 
@@ -105,27 +111,27 @@ Reset clears conversational state while preserving the session identifier. Delet
 |---|---|---|
 | `GET` | `/health` | Backward-compatible liveness alias |
 | `GET` | `/health/live` | Process liveness |
-| `GET` | `/health/ready` | Backend and capacity readiness |
-| `POST` | `/api/v1/sessions` | Create an isolated expiring session |
+| `GET` | `/health/ready` | Backend, storage, and capacity readiness |
+| `POST` | `/api/v1/sessions` | Create a durable isolated session |
 | `GET` | `/api/v1/sessions/{id}` | Read non-sensitive session metadata |
-| `POST` | `/api/v1/sessions/{id}/reset` | Reset session state |
-| `DELETE` | `/api/v1/sessions/{id}` | Delete session state |
-| `POST` | `/api/v1/chat` | Process one message inside a session |
+| `POST` | `/api/v1/sessions/{id}/reset` | Durably reset session state |
+| `DELETE` | `/api/v1/sessions/{id}` | Delete durable session state and events |
+| `POST` | `/api/v1/chat` | Process and durably commit one turn |
 
-Every response carries `x-request-id`. Request tracing records HTTP metadata rather than raw conversation bodies. JSON requests require `application/json`, and the transport rejects bodies above the configured maximum before domain processing.
+Every response carries `x-request-id`. Request tracing records HTTP metadata rather than raw conversation bodies. JSON requests require `application/json`, and the transport rejects oversized bodies before domain processing.
 
 Errors use a stable JSON envelope:
 
 ```json
 {
   "error": {
-    "code": "unknown_session",
-    "message": "session does not exist or has expired"
+    "code": "state_conflict",
+    "message": "session state changed concurrently; retry the request"
   }
 }
 ```
 
-Current error codes include `invalid_json`, `unsupported_media_type`, `request_too_large`, `unknown_session`, `server_busy`, `empty_message`, `message_too_large`, and `inference_unavailable`.
+Current error codes include `invalid_json`, `unsupported_media_type`, `request_too_large`, `unknown_session`, `server_busy`, `state_conflict`, `storage_unavailable`, `state_version_overflow`, `empty_message`, `message_too_large`, and `inference_unavailable`.
 
 ## Test
 
@@ -136,22 +142,25 @@ cargo test --locked --workspace --all-features
 cargo build --locked --workspace --release
 ```
 
-The checked-in synthetic fixture contains no real user data. Tests cover deterministic replay, transactional failure, conflicting sessions, lifecycle reset/delete, deterministic expiry, request IDs, media-type/body limits, readiness, and bounded inference concurrency.
+Tests cover deterministic replay, transactional rollback, session isolation, durable reset/delete/expiry, optimistic conflicts, SQLite migration and integrity, file-backed restart recovery, request validation, capacity bounds, and container restart recovery against a named volume.
 
 ## Container
 
 ```bash
 docker build -t ingexuity .
-docker run --rm -p 8000:8000 ingexuity
+docker volume create ingexuity-data
+docker run --rm -p 8000:8000 \
+  -v ingexuity-data:/app/data \
+  ingexuity
 ```
 
-The image does not download or bundle a language model.
+The image runs as a non-root user, stores SQLite data under `/app/data`, and does not download or bundle a language model.
 
 ## Current limitations
 
-- Sessions and user models are in memory only; durable identity begins in Phase 2.
+- Durable sessions currently store the complete private conversation snapshot; provenance-aware memory claims, selective correction, export/import, and retention controls are the next Phase 2 work.
 - Session UUIDs isolate state but are not a complete hosted authentication system.
-- Concurrency is bounded, but the current synchronous inference trait cannot safely cancel an already-running backend call. Cancellation and timeouts require the planned inference-adapter boundary.
+- Concurrency is bounded, but the current synchronous inference trait cannot safely cancel an already-running backend call. Cancellation and timeouts require the planned inference adapter.
 - Rate limiting, explicit hosted-mode CORS policy, and authentication remain release blockers for public multi-tenant deployment.
 - Prediction quality, SANDBOX SIM value, emotional adaptation, and mobile performance remain unproven research hypotheses.
 
