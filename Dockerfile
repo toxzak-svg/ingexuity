@@ -1,13 +1,14 @@
 # syntax=docker/dockerfile:1
 
-FROM rust:1.82-bookworm AS builder
+FROM rust:1.97-bookworm AS builder
 WORKDIR /app
 
 COPY Cargo.toml ./
+COPY Cargo.lock ./
 COPY crates ./crates
 COPY fixtures ./fixtures
 
-RUN cargo build --release -p ingexuity-server
+RUN cargo build --locked --release -p ingexuity-server
 
 FROM debian:bookworm-slim AS runtime
 WORKDIR /app
