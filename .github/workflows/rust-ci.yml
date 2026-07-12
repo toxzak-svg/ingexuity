@@ -19,11 +19,21 @@ jobs:
         with:
           toolchain: 1.97.0
 
-      - name: Run store tests with focused failure output
+      - name: Run store tests
+        id: test
+        continue-on-error: true
         shell: bash
         run: |
-          set +e
-          cargo test --locked -p ingexuity-store -- --nocapture > /tmp/store-test.log 2>&1
-          status=$?
-          tail -n 160 /tmp/store-test.log
-          exit $status
+          set -o pipefail
+          cargo test --locked -p ingexuity-store -- --nocapture 2>&1 | tee store-test.log
+
+      - name: Upload store test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlite-store-test-log
+          path: store-test.log
+
+      - name: Enforce test result
+        if: always()
+        run: test "${{ steps.test.outcome }}" = success
