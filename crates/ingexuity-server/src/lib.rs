@@ -40,7 +40,8 @@ impl SessionManager {
 
     pub async fn snapshot(&self, id: SessionId) -> Option<ConversationState> {
         let session = self.get(id).await?;
-        Some(session.lock().await.clone())
+        let snapshot = session.lock().await.clone();
+        Some(snapshot)
     }
 }
 
