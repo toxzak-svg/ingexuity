@@ -70,10 +70,11 @@ impl ConversationState {
     }
 
     pub fn reset(&mut self) -> Result<(), CoreError> {
-        let next_version = self
-            .version
-            .checked_add(1)
-            .ok_or(CoreError::VersionOverflow)?;
+        let next_version = self.version.checked_add(1).ok_or_else(|| {
+            CoreError::Inference(InferenceError::Failed(
+                "conversation state version overflowed".to_owned(),
+            ))
+        })?;
         *self = Self::new(self.session_id);
         self.version = next_version;
         Ok(())
@@ -202,8 +203,6 @@ pub enum CoreError {
     EmptyMessage,
     #[error("message exceeds {MAX_MESSAGE_BYTES} bytes")]
     MessageTooLarge,
-    #[error("conversation state version overflowed")]
-    VersionOverflow,
     #[error(transparent)]
     Inference(#[from] InferenceError),
 }
