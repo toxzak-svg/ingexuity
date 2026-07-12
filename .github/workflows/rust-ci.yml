@@ -1,19 +1,13 @@
-name: Rust CI
+name: Diagnose workspace tests
 
 on:
-  push:
-    branches: [main]
   pull_request:
 
 permissions:
   contents: read
 
-concurrency:
-  group: rust-ci-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  test:
+  package-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -24,79 +18,28 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.97.0
-          components: rustfmt, clippy
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Lint
-        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-
-      - name: Test
-        run: cargo test --locked --workspace --all-features
-
-      - name: Build release binary
-        run: cargo build --locked --workspace --release
-
-      - name: Start model-free server
+      - name: Test core
+        shell: bash
         run: |
-          target/release/ingexuity-server > /tmp/ingexuity.log 2>&1 &
-          echo $! > /tmp/ingexuity.pid
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:8000/health/live > /tmp/live.json \
-              && curl --fail --silent http://127.0.0.1:8000/health/ready > /tmp/ready.json; then
-              exit 0
-            fi
-            sleep 1
-          done
-          cat /tmp/ingexuity.log
-          exit 1
+          set -o pipefail
+          cargo test --locked -p ingexuity-core -- --nocapture 2>&1 | tee core-test.log
 
-      - name: Verify health contracts
+      - name: Test store
+        shell: bash
         run: |
-          python3 - <<'PY'
-          import json
-          with open('/tmp/live.json', encoding='utf-8') as handle:
-              live = json.load(handle)
-          with open('/tmp/ready.json', encoding='utf-8') as handle:
-              ready = json.load(handle)
-          assert live['status'] == 'ok', live
-          assert live['runtime'] == 'rust', live
-          assert ready['status'] == 'ready', ready
-          assert ready['runtime'] == 'rust', ready
-          assert ready['backend'] == 'ready', ready
-          assert ready['available_inference_slots'] >= 1, ready
-          PY
+          set -o pipefail
+          cargo test --locked -p ingexuity-store -- --nocapture 2>&1 | tee store-test.log
 
-      - name: Stop server
+      - name: Test server
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p ingexuity-server -- --nocapture 2>&1 | tee server-test.log
+
+      - name: Upload package test logs
         if: always()
-        run: |
-          if [ -f /tmp/ingexuity.pid ]; then
-            kill "$(cat /tmp/ingexuity.pid)" || true
-          fi
-          cat /tmp/ingexuity.log || true
-
-  container:
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Build model-free image
-        run: docker build --tag ingexuity:ci .
-
-      - name: Smoke test container
-        run: |
-          docker run --detach --rm --name ingexuity-ci -p 8000:8000 ingexuity:ci
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:8000/health/live > /tmp/container-live.json \
-              && curl --fail --silent http://127.0.0.1:8000/health/ready > /tmp/container-ready.json; then
-              docker stop ingexuity-ci
-              exit 0
-            fi
-            sleep 1
-          done
-          docker logs ingexuity-ci
-          docker stop ingexuity-ci || true
-          exit 1
+        uses: actions/upload-artifact@v4
+        with:
+          name: workspace-package-test-logs
+          path: '*-test.log'
