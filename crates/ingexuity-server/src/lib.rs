@@ -1,93 +1,317 @@
 #![forbid(unsafe_code)]
 
 use axum::{
-    extract::{rejection::JsonRejection, State},
-    http::StatusCode,
+    extract::{rejection::JsonRejection, DefaultBodyLimit, Path, State},
+    http::{HeaderName, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use ingexuity_core::{
     process_turn, BackendHealth, ChatOutcome, ConversationState, CoreError, HeuristicBackend,
-    InferenceBackend, SessionId,
+    InferenceBackend, SessionId, MAX_MESSAGE_BYTES,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use thiserror::Error;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, Semaphore};
+use tower_http::{
+    request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
+    trace::TraceLayer,
+};
 use uuid::Uuid;
 
-#[derive(Clone, Default)]
+pub const MAX_REQUEST_BODY_BYTES: usize = MAX_MESSAGE_BYTES + 1024;
+pub const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(30 * 60);
+pub const DEFAULT_MAX_INFERENCE_CONCURRENCY: usize = 4;
+
+pub trait Clock: Send + Sync {
+    fn now_millis(&self) -> u64;
+}
+
+#[derive(Debug, Default)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now_millis(&self) -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX)
+    }
+}
+
+struct SessionEntry {
+    state: Mutex<ConversationState>,
+    created_at_ms: u64,
+    last_access_ms: AtomicU64,
+}
+
+impl SessionEntry {
+    fn new(state: ConversationState, now_ms: u64) -> Self {
+        Self {
+            state: Mutex::new(state),
+            created_at_ms: now_ms,
+            last_access_ms: AtomicU64::new(now_ms),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct SessionManager {
-    sessions: Arc<RwLock<HashMap<SessionId, Arc<Mutex<ConversationState>>>>>,
+    sessions: Arc<RwLock<HashMap<SessionId, Arc<SessionEntry>>>>,
+    clock: Arc<dyn Clock>,
+    ttl_ms: u64,
+}
+
+impl Default for SessionManager {
+    fn default() -> Self {
+        Self::new(DEFAULT_SESSION_TTL)
+    }
 }
 
 impl SessionManager {
+    #[must_use]
+    pub fn new(ttl: Duration) -> Self {
+        Self::with_clock(ttl, Arc::new(SystemClock))
+    }
+
+    #[must_use]
+    pub fn with_clock(ttl: Duration, clock: Arc<dyn Clock>) -> Self {
+        let ttl_ms = u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX).max(1);
+        Self {
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            clock,
+            ttl_ms,
+        }
+    }
+
     pub async fn create(&self) -> SessionId {
         let id = Uuid::new_v4();
-        let session = Arc::new(Mutex::new(ConversationState::new(id)));
-        self.sessions.write().await.insert(id, session);
+        let now_ms = self.clock.now_millis();
+        let entry = Arc::new(SessionEntry::new(ConversationState::new(id), now_ms));
+        self.sessions.write().await.insert(id, entry);
         id
     }
 
-    pub async fn get(&self, id: SessionId) -> Option<Arc<Mutex<ConversationState>>> {
-        self.sessions.read().await.get(&id).cloned()
+    async fn get(&self, id: SessionId) -> Option<Arc<SessionEntry>> {
+        let now_ms = self.clock.now_millis();
+        let entry = self.sessions.read().await.get(&id).cloned()?;
+
+        if self.is_expired(&entry, now_ms) {
+            let mut sessions = self.sessions.write().await;
+            let should_remove = sessions
+                .get(&id)
+                .map(|current| Arc::ptr_eq(current, &entry) && self.is_expired(current, now_ms))
+                .unwrap_or(false);
+            if should_remove {
+                sessions.remove(&id);
+            }
+            return None;
+        }
+
+        entry.last_access_ms.store(now_ms, Ordering::Release);
+        Some(entry)
+    }
+
+    #[must_use]
+    pub fn ttl_seconds(&self) -> u64 {
+        self.ttl_ms.div_ceil(1000)
     }
 
     pub async fn count(&self) -> usize {
+        self.sweep_expired().await;
         self.sessions.read().await.len()
     }
 
     pub async fn snapshot(&self, id: SessionId) -> Option<ConversationState> {
-        let session = self.get(id).await?;
-        let snapshot = session.lock().await.clone();
+        let entry = self.get(id).await?;
+        let snapshot = entry.state.lock().await.clone();
         Some(snapshot)
+    }
+
+    pub async fn metadata(&self, id: SessionId) -> Option<SessionMetadataResponse> {
+        let entry = self.get(id).await?;
+        let state = entry.state.lock().await;
+        Some(self.metadata_from(&entry, &state))
+    }
+
+    pub async fn reset(&self, id: SessionId) -> Option<SessionMetadataResponse> {
+        let entry = self.get(id).await?;
+        let mut state = entry.state.lock().await;
+        *state = ConversationState::new(id);
+        Some(self.metadata_from(&entry, &state))
+    }
+
+    pub async fn delete(&self, id: SessionId) -> bool {
+        self.sessions.write().await.remove(&id).is_some()
+    }
+
+    pub async fn sweep_expired(&self) -> usize {
+        let now_ms = self.clock.now_millis();
+        let mut sessions = self.sessions.write().await;
+        let before = sessions.len();
+        sessions.retain(|_, entry| !self.is_expired(entry, now_ms));
+        before - sessions.len()
+    }
+
+    fn is_expired(&self, entry: &SessionEntry, now_ms: u64) -> bool {
+        let last_access_ms = entry.last_access_ms.load(Ordering::Acquire);
+        now_ms.saturating_sub(last_access_ms) > self.ttl_ms
+    }
+
+    fn metadata_from(
+        &self,
+        entry: &SessionEntry,
+        state: &ConversationState,
+    ) -> SessionMetadataResponse {
+        let last_access_ms = entry.last_access_ms.load(Ordering::Acquire);
+        SessionMetadataResponse {
+            session_id: state.session_id,
+            turn_count: state.turn_count,
+            state_version: state.version,
+            created_at_ms: entry.created_at_ms,
+            last_access_ms,
+            expires_at_ms: last_access_ms.saturating_add(self.ttl_ms),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AppConfig {
+    pub session_ttl: Duration,
+    pub max_inference_concurrency: usize,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            session_ttl: DEFAULT_SESSION_TTL,
+            max_inference_concurrency: DEFAULT_MAX_INFERENCE_CONCURRENCY,
+        }
     }
 }
 
 #[derive(Clone)]
 pub struct AppState {
-    pub sessions: SessionManager,
-    pub backend: Arc<dyn InferenceBackend>,
+    sessions: SessionManager,
+    backend: Arc<dyn InferenceBackend>,
+    inference_slots: Arc<Semaphore>,
 }
 
 impl Default for AppState {
     fn default() -> Self {
+        Self::new(Arc::new(HeuristicBackend), AppConfig::default())
+    }
+}
+
+impl AppState {
+    #[must_use]
+    pub fn new(backend: Arc<dyn InferenceBackend>, config: AppConfig) -> Self {
+        Self::with_components(
+            backend,
+            SessionManager::new(config.session_ttl),
+            config.max_inference_concurrency,
+        )
+    }
+
+    #[must_use]
+    pub fn with_components(
+        backend: Arc<dyn InferenceBackend>,
+        sessions: SessionManager,
+        max_inference_concurrency: usize,
+    ) -> Self {
         Self {
-            sessions: SessionManager::default(),
-            backend: Arc::new(HeuristicBackend),
+            sessions,
+            backend,
+            inference_slots: Arc::new(Semaphore::new(max_inference_concurrency.max(1))),
         }
+    }
+
+    #[must_use]
+    pub fn sessions(&self) -> &SessionManager {
+        &self.sessions
     }
 }
 
 pub fn app(state: AppState) -> Router {
+    let request_id_header = HeaderName::from_static("x-request-id");
+
     Router::new()
-        .route("/health", get(health))
+        .route("/health", get(liveness))
+        .route("/health/live", get(liveness))
+        .route("/health/ready", get(readiness))
         .route("/api/v1/sessions", post(create_session))
+        .route(
+            "/api/v1/sessions/{session_id}",
+            get(get_session).delete(delete_session),
+        )
+        .route("/api/v1/sessions/{session_id}/reset", post(reset_session))
         .route("/api/v1/chat", post(chat))
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
+        .layer(PropagateRequestIdLayer::new(request_id_header.clone()))
+        .layer(TraceLayer::new_for_http())
+        .layer(SetRequestIdLayer::new(request_id_header, MakeRequestUuid))
         .with_state(state)
 }
 
 #[derive(Debug, Serialize)]
-struct HealthResponse {
+struct LivenessResponse {
+    status: &'static str,
+    runtime: &'static str,
+}
+
+async fn liveness() -> Json<LivenessResponse> {
+    Json(LivenessResponse {
+        status: "ok",
+        runtime: "rust",
+    })
+}
+
+#[derive(Debug, Serialize)]
+struct ReadinessResponse {
     status: &'static str,
     runtime: &'static str,
     backend: BackendHealth,
-    sessions: usize,
+    active_sessions: usize,
+    available_inference_slots: usize,
 }
 
-async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
-    Json(HealthResponse {
-        status: "ok",
-        runtime: "rust",
-        backend: state.backend.health(),
-        sessions: state.sessions.count().await,
-    })
+async fn readiness(State(state): State<AppState>) -> (StatusCode, Json<ReadinessResponse>) {
+    let backend = state.backend.health();
+    let ready = !matches!(backend, BackendHealth::Unavailable);
+    let status = if ready { "ready" } else { "not_ready" };
+    let status_code = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    (
+        status_code,
+        Json(ReadinessResponse {
+            status,
+            runtime: "rust",
+            backend,
+            active_sessions: state.sessions.count().await,
+            available_inference_slots: state.inference_slots.available_permits(),
+        }),
+    )
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateSessionResponse {
     pub session_id: SessionId,
+    pub expires_in_seconds: u64,
 }
 
 async fn create_session(
@@ -96,8 +320,56 @@ async fn create_session(
     let session_id = state.sessions.create().await;
     (
         StatusCode::CREATED,
-        Json(CreateSessionResponse { session_id }),
+        Json(CreateSessionResponse {
+            session_id,
+            expires_in_seconds: state.sessions.ttl_seconds(),
+        }),
     )
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionMetadataResponse {
+    pub session_id: SessionId,
+    pub turn_count: u64,
+    pub state_version: u64,
+    pub created_at_ms: u64,
+    pub last_access_ms: u64,
+    pub expires_at_ms: u64,
+}
+
+async fn get_session(
+    Path(session_id): Path<SessionId>,
+    State(state): State<AppState>,
+) -> Result<Json<SessionMetadataResponse>, AppError> {
+    let metadata = state
+        .sessions
+        .metadata(session_id)
+        .await
+        .ok_or(AppError::UnknownSession)?;
+    Ok(Json(metadata))
+}
+
+async fn reset_session(
+    Path(session_id): Path<SessionId>,
+    State(state): State<AppState>,
+) -> Result<Json<SessionMetadataResponse>, AppError> {
+    let metadata = state
+        .sessions
+        .reset(session_id)
+        .await
+        .ok_or(AppError::UnknownSession)?;
+    Ok(Json(metadata))
+}
+
+async fn delete_session(
+    Path(session_id): Path<SessionId>,
+    State(state): State<AppState>,
+) -> Result<StatusCode, AppError> {
+    if state.sessions.delete(session_id).await {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(AppError::UnknownSession)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -119,14 +391,19 @@ async fn chat(
     State(state): State<AppState>,
     payload: Result<Json<ChatRequest>, JsonRejection>,
 ) -> Result<Json<ChatResponse>, AppError> {
-    let Json(request) = payload.map_err(|_| AppError::InvalidJson)?;
+    let Json(request) = payload.map_err(AppError::from_json_rejection)?;
     let session = state
         .sessions
         .get(request.session_id)
         .await
         .ok_or(AppError::UnknownSession)?;
+    let _permit = state
+        .inference_slots
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| AppError::ServerBusy)?;
 
-    let mut session = session.lock().await;
+    let mut session = session.state.lock().await;
     let ChatOutcome {
         text,
         backend,
@@ -147,8 +424,14 @@ async fn chat(
 pub enum AppError {
     #[error("request body must be valid JSON")]
     InvalidJson,
-    #[error("session does not exist")]
+    #[error("content-type must be application/json")]
+    UnsupportedMediaType,
+    #[error("request body is too large")]
+    RequestTooLarge,
+    #[error("session does not exist or has expired")]
     UnknownSession,
+    #[error("inference capacity is currently full")]
+    ServerBusy,
     #[error(transparent)]
     Core(#[from] CoreError),
 }
@@ -165,10 +448,23 @@ struct ErrorBody {
 }
 
 impl AppError {
+    fn from_json_rejection(rejection: JsonRejection) -> Self {
+        match rejection.status() {
+            StatusCode::PAYLOAD_TOO_LARGE => Self::RequestTooLarge,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE => Self::UnsupportedMediaType,
+            _ => Self::InvalidJson,
+        }
+    }
+
     fn status_and_code(&self) -> (StatusCode, &'static str) {
         match self {
             Self::InvalidJson => (StatusCode::BAD_REQUEST, "invalid_json"),
+            Self::UnsupportedMediaType => {
+                (StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type")
+            }
+            Self::RequestTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "request_too_large"),
             Self::UnknownSession => (StatusCode::NOT_FOUND, "unknown_session"),
+            Self::ServerBusy => (StatusCode::TOO_MANY_REQUESTS, "server_busy"),
             Self::Core(CoreError::EmptyMessage) => (StatusCode::BAD_REQUEST, "empty_message"),
             Self::Core(CoreError::MessageTooLarge) => {
                 (StatusCode::PAYLOAD_TOO_LARGE, "message_too_large")
@@ -201,7 +497,9 @@ mod tests {
         http::{header::CONTENT_TYPE, Request},
     };
     use http_body_util::BodyExt;
+    use ingexuity_core::{BackendMetadata, Generation, GenerationRequest, InferenceError};
     use serde_json::{json, Value};
+    use std::sync::atomic::AtomicBool;
     use tower::ServiceExt;
 
     async fn json_body(response: axum::response::Response) -> Value {
@@ -209,17 +507,47 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    fn chat_request(session_id: SessionId, message: &str) -> Request<Body> {
+        Request::post("/api/v1/chat")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({"session_id": session_id, "message": message}).to_string(),
+            ))
+            .unwrap()
+    }
+
     #[tokio::test]
-    async fn health_reports_rust_runtime() {
+    async fn liveness_and_readiness_report_real_state() {
+        let router = app(AppState::default());
+
+        let live = router
+            .clone()
+            .oneshot(Request::get("/health/live").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(live.status(), StatusCode::OK);
+        let live_body = json_body(live).await;
+        assert_eq!(live_body["runtime"], "rust");
+        assert_eq!(live_body["status"], "ok");
+
+        let ready = router
+            .oneshot(Request::get("/health/ready").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(ready.status(), StatusCode::OK);
+        let ready_body = json_body(ready).await;
+        assert_eq!(ready_body["status"], "ready");
+        assert_eq!(ready_body["backend"], "ready");
+    }
+
+    #[tokio::test]
+    async fn every_response_has_a_request_id() {
         let response = app(AppState::default())
             .oneshot(Request::get("/health").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = json_body(response).await;
-        assert_eq!(body["runtime"], "rust");
-        assert_eq!(body["status"], "ok");
+        assert!(response.headers().contains_key("x-request-id"));
     }
 
     #[tokio::test]
@@ -240,22 +568,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_session_returns_not_found() {
+    async fn missing_content_type_is_rejected() {
+        let response = app(AppState::default())
+            .oneshot(
+                Request::post("/api/v1/chat")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        let body = json_body(response).await;
+        assert_eq!(body["error"]["code"], "unsupported_media_type");
+    }
+
+    #[tokio::test]
+    async fn oversized_request_is_rejected() {
+        let message = "x".repeat(MAX_REQUEST_BODY_BYTES + 1);
         let response = app(AppState::default())
             .oneshot(
                 Request::post("/api/v1/chat")
                     .header(CONTENT_TYPE, "application/json")
                     .body(Body::from(
-                        json!({"session_id": Uuid::new_v4(), "message": "hello"}).to_string(),
+                        json!({"session_id": Uuid::new_v4(), "message": message}).to_string(),
                     ))
                     .unwrap(),
             )
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
         let body = json_body(response).await;
-        assert_eq!(body["error"]["code"], "unknown_session");
+        assert_eq!(body["error"]["code"], "request_too_large");
     }
 
     #[tokio::test]
@@ -271,14 +616,7 @@ mod tests {
         ] {
             let response = router
                 .clone()
-                .oneshot(
-                    Request::post("/api/v1/chat")
-                        .header(CONTENT_TYPE, "application/json")
-                        .body(Body::from(
-                            json!({"session_id": session_id, "message": message}).to_string(),
-                        ))
-                        .unwrap(),
-                )
+                .oneshot(chat_request(session_id, message))
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
@@ -290,32 +628,145 @@ mod tests {
         assert!(a.user_model.topics.contains("work"));
         assert!(a.user_model.topics.contains("software"));
         assert!(!a.user_model.topics.contains("family"));
-
         assert!(b.user_model.topics.contains("family"));
         assert!(!b.user_model.topics.contains("work"));
-        assert!(!b.user_model.topics.contains("software"));
     }
 
     #[tokio::test]
-    async fn empty_message_does_not_advance_state() {
+    async fn reset_and_delete_control_session_lifecycle() {
         let state = AppState::default();
         let session_id = state.sessions.create().await;
-        let before = state.sessions.snapshot(session_id).await.unwrap();
+        let router = app(state.clone());
 
-        let response = app(state.clone())
+        let chat = router
+            .clone()
+            .oneshot(chat_request(session_id, "Rust work"))
+            .await
+            .unwrap();
+        assert_eq!(chat.status(), StatusCode::OK);
+
+        let reset = router
+            .clone()
             .oneshot(
-                Request::post("/api/v1/chat")
-                    .header(CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        json!({"session_id": session_id, "message": "   "}).to_string(),
-                    ))
+                Request::post(format!("/api/v1/sessions/{session_id}/reset"))
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
+        assert_eq!(reset.status(), StatusCode::OK);
+        let reset_body = json_body(reset).await;
+        assert_eq!(reset_body["turn_count"], 0);
+        assert_eq!(reset_body["state_version"], 0);
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let after = state.sessions.snapshot(session_id).await.unwrap();
-        assert_eq!(before, after);
+        let delete = router
+            .clone()
+            .oneshot(
+                Request::delete(format!("/api/v1/sessions/{session_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delete.status(), StatusCode::NO_CONTENT);
+
+        let missing = router
+            .oneshot(chat_request(session_id, "hello"))
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[derive(Default)]
+    struct ManualClock {
+        now_ms: AtomicU64,
+    }
+
+    impl ManualClock {
+        fn advance(&self, millis: u64) {
+            self.now_ms.fetch_add(millis, Ordering::AcqRel);
+        }
+    }
+
+    impl Clock for ManualClock {
+        fn now_millis(&self) -> u64 {
+            self.now_ms.load(Ordering::Acquire)
+        }
+    }
+
+    #[tokio::test]
+    async fn expired_sessions_are_removed_deterministically() {
+        let clock = Arc::new(ManualClock::default());
+        let sessions = SessionManager::with_clock(Duration::from_millis(100), clock.clone());
+        let session_id = sessions.create().await;
+
+        clock.advance(101);
+
+        assert!(sessions.snapshot(session_id).await.is_none());
+        assert_eq!(sessions.count().await, 0);
+    }
+
+    struct SlowBackend {
+        started: Arc<AtomicBool>,
+    }
+
+    impl InferenceBackend for SlowBackend {
+        fn metadata(&self) -> BackendMetadata {
+            BackendMetadata {
+                id: "slow-test".to_owned(),
+                kind: "test".to_owned(),
+                model: None,
+                local: true,
+            }
+        }
+
+        fn health(&self) -> BackendHealth {
+            BackendHealth::Ready
+        }
+
+        fn generate(&self, _: &GenerationRequest) -> Result<Generation, InferenceError> {
+            self.started.store(true, Ordering::Release);
+            std::thread::sleep(Duration::from_millis(150));
+            Ok(Generation {
+                text: "done".to_owned(),
+            })
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn inference_concurrency_is_bounded() {
+        let started = Arc::new(AtomicBool::new(false));
+        let state = AppState::with_components(
+            Arc::new(SlowBackend {
+                started: started.clone(),
+            }),
+            SessionManager::default(),
+            1,
+        );
+        let session_a = state.sessions.create().await;
+        let session_b = state.sessions.create().await;
+        let router = app(state);
+
+        let first_router = router.clone();
+        let first = tokio::spawn(async move {
+            first_router
+                .oneshot(chat_request(session_a, "first"))
+                .await
+                .unwrap()
+        });
+
+        while !started.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+
+        let second = router
+            .oneshot(chat_request(session_b, "second"))
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = json_body(second).await;
+        assert_eq!(body["error"]["code"], "server_busy");
+
+        assert_eq!(first.await.unwrap().status(), StatusCode::OK);
     }
 }

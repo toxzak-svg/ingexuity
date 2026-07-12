@@ -43,7 +43,8 @@ jobs:
           target/release/ingexuity-server > /tmp/ingexuity.log 2>&1 &
           echo $! > /tmp/ingexuity.pid
           for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:8000/health > /tmp/health.json; then
+            if curl --fail --silent http://127.0.0.1:8000/health/live > /tmp/live.json \
+              && curl --fail --silent http://127.0.0.1:8000/health/ready > /tmp/ready.json; then
               exit 0
             fi
             sleep 1
@@ -51,15 +52,20 @@ jobs:
           cat /tmp/ingexuity.log
           exit 1
 
-      - name: Verify health contract
+      - name: Verify health contracts
         run: |
           python3 - <<'PY'
           import json
-          with open('/tmp/health.json', encoding='utf-8') as handle:
-              health = json.load(handle)
-          assert health['status'] == 'ok', health
-          assert health['runtime'] == 'rust', health
-          assert health['backend'] == 'ready', health
+          with open('/tmp/live.json', encoding='utf-8') as handle:
+              live = json.load(handle)
+          with open('/tmp/ready.json', encoding='utf-8') as handle:
+              ready = json.load(handle)
+          assert live['status'] == 'ok', live
+          assert live['runtime'] == 'rust', live
+          assert ready['status'] == 'ready', ready
+          assert ready['runtime'] == 'rust', ready
+          assert ready['backend'] == 'ready', ready
+          assert ready['available_inference_slots'] >= 1, ready
           PY
 
       - name: Stop server
@@ -84,7 +90,8 @@ jobs:
         run: |
           docker run --detach --rm --name ingexuity-ci -p 8000:8000 ingexuity:ci
           for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:8000/health > /tmp/container-health.json; then
+            if curl --fail --silent http://127.0.0.1:8000/health/live > /tmp/container-live.json \
+              && curl --fail --silent http://127.0.0.1:8000/health/ready > /tmp/container-ready.json; then
               docker stop ingexuity-ci
               exit 0
             fi
