@@ -1,172 +1,137 @@
 # IngExuity
 
-**A life partner AI that becomes irreplaceable through use, not training.**
+IngExuity is a local-first companion research project built around explicit user modeling, durable memory, and falsifiable prediction.
 
-She predicts what you need before you ask. She stays with you when you're upset. She gets slightly different on every device you run her on. She's yours — not trained to be yours, yours because she knows you.
+The production substrate is **Rust**. The existing Julia implementation remains in the repository temporarily as legacy behavioral reference while useful concepts and tests are migrated.
 
-Built in Julia everywhere. Runs on Railway. Works offline on your phone. No external API dependencies — everything runs locally.
+> Current status: Phase 0 Rust foundation. The default server is model-free, deterministic, and intended to prove the runtime, session, API, and evaluation contracts before local model integration.
 
----
+## What is active
 
-## What This Is
+| Component | Status | Notes |
+|---|---|---|
+| Rust workspace | **active** | Root Cargo workspace |
+| `ingexuity-core` | **active** | Typed state and transactional turn processing |
+| `ingexuity-server` | **active** | Axum API with isolated UUID sessions |
+| Deterministic fallback | **active** | Model-free CI and failure-path backend |
+| Rust CI and container | **active** | Format, clippy, tests, release build, smoke tests |
+| GGUF/llama.cpp backend | planned | Added after backend contracts are stable |
+| SQLite event store | planned | Phase 2 |
+| Prediction ledger/replay | planned | Phase 3 |
+| Independent SANDBOX SIM | planned | Phase 5 |
+| Mobile runtime | research | Requires measured prototypes |
+| Julia runtime and models | **legacy** | Reference only; not the production path |
 
-IngExuity is a prediction-first AI architecture. She doesn't answer questions — she predicts what you need, validates it through a sandbox simulation, and responds with the right answer shaped for *you* in the right tone at the right moment.
+## Why Rust
 
-**Empathy = prediction + directness + staying with it**
+IngExuity needs explicit ownership of per-user state, safe concurrency, native deployment, durable schemas, deterministic replay, and replaceable local inference backends. Rust provides a strong substrate for those requirements without making the product depend on an unvalidated custom model architecture.
 
-Not emergent. Not a trick. The architecture does it deliberately.
+## Current request path
 
----
-
-## Architecture
-
-16 modules + Memory layer. Full spec at [`docs/INGEXUITY_ARCHITECTURE.md`](docs/INGEXUITY_ARCHITECTURE.md).
-
-```
-Input Layer:        Human Input, Results Analysis
-Cognitive:          Comprehension, Self Model, User Model, Internal/Emotional, Curiosity
-Research/Reasoning: Research, Creative/Ingenuity, Decision, Precognition
-Prediction Engine:  Predictions, SANDBOX SIM ← PRIMARY
-Output Layer:       Action, Reaction Observance, Response, Voice, Output, Understanding, Intelligence
-Memory Layer:       Memory (validity-window store)
-```
-
-**The key insight:** The system doesn't ask "what should I say." She asks "what will the user need in the next 30 seconds?"
-
-**Presencing:** When stress > 0.6 OR emotional charge > 0.7 OR valence < -0.3, she stays present. Acknowledges first. Solves after you're heard. That's empathy.
-
----
-
-## The Julia Transformer — No External Dependencies
-
-IngExuity uses a **Julia-native transformer** built with Flux.jl. No Gemma. No Google API. No external LLM provider.
-
-The transformer stack (Linguist-LSA architecture, see `SPEC.md`):
-- Selective SSM (Mamba-style) for long-range memory
-- Linear merge attention (no KV cache, constant memory)
-- Low-rank SwiGLU FFN (66% parameter reduction vs standard)
-- Fully integer-quantized inference (INT4 target: ~30-60MB total)
-
-**Hardware target:** Mobile CPU, GPU-free. ~50-100M params Q4 (~30-60MB). Runs offline.
-
-**Why Julia:**
-- Multiple dispatch for clean integer/float backend switching
-- Integer arithmetic is native — no accidental float promotion
-- SIMD pragmas work on integer loops
-- Static compilation to standalone binary for mobile
-- CUDA.jl for GPU acceleration when available
-
-**The Julia Transformer — NanoGPT.jl**
-
-`src/modules/NanoGPT.jl` — a full GPT architecture in Flux.jl, scaled to ~50M params:
-- Pre-norm transformer blocks (GPT-2 style)
-- Multi-head self-attention with causal masking
-- GELU activation, low-rank projection-friendly
-- Autoregressive generation with top-k/top-p sampling
-- Configurable: n_embed, n_layers, n_heads, vocab_size
-
-`src/modules/BPETokenizer.jl` — GPT-2 style BPE tokenizer in pure Julia:
-- Byte-level BPE (matches GPT-2 vocabulary)
-- Pure Julia, no external dependencies
-- Train on custom corpus or load GPT-2 pre-trained merges
-
-**Quick start (local inference):**
-```julia
-using IngExuity
-load_local_model()       # Load NanoGPT (~50M params)
-load_local_tokenizer()   # Load BPE tokenizer
-response = chat_local("Hello, how are you?")
+```text
+HTTP request
+  -> versioned Axum API
+  -> opaque session lookup
+  -> per-session lock
+  -> typed ConversationState clone
+  -> pending next-turn prediction issued
+  -> InferenceBackend
+       currently: deterministic model-free fallback
+  -> assistant turn appended
+  -> state committed atomically
+  -> JSON response
 ```
 
-**Build stack:**
-```
-Tokenization (GPT-2 BPE, ported to Julia)
-  → Transformer (Flux.jl, 50-100M params)
-    → WASM compile (PackageCompiler)
-      → Mobile PWA (offline, no server needed)
-```
+A failed backend call does not partially mutate session state. Producing a response does not mark a prediction correct.
 
----
+## Run locally
 
-## Running
+Install a stable Rust toolchain, then:
 
 ```bash
-# Local dev
-julia --project=. -e 'using IngExuity; IngExuity.start()'
-
-# Or run interactively
-julia --project=.
-using IngExuity
-chat("Hello, how are you?")
+cargo run -p ingexuity-server
 ```
 
----
+The server binds to `0.0.0.0:8000` by default. Override it with:
 
-## Deploy to Railway
+```bash
+INGEXUITY_BIND=127.0.0.1:9000 cargo run -p ingexuity-server
+```
 
-One click. Seriously.
+### Health
 
-1. Fork this repo
-2. Connect to Railway
-3. It auto-detects the Dockerfile
-4. Click deploy
+```bash
+curl http://127.0.0.1:8000/health
+```
 
-Your IngExuity instance at `https://your-app.railway.dev/`
+### Create a session
 
----
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/sessions
+```
+
+### Send a message
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/chat \
+  -H 'content-type: application/json' \
+  -d '{"session_id":"SESSION_UUID","message":"Can you help me test this?"}'
+```
+
+The current response comes from the deterministic fallback and says so explicitly. Model-backed generation is not yet advertised as active.
+
+## Test
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+cargo build --workspace --release
+```
+
+The checked-in synthetic fixture contains no real user data and covers ordinary questions, stress-language handling, HTML-as-data, deterministic replay, and conflicting multi-session preferences.
+
+## Container
+
+```bash
+docker build -t ingexuity .
+docker run --rm -p 8000:8000 ingexuity
+```
+
+The image does not download or bundle a language model.
 
 ## API
 
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/health` | Liveness plus runtime/backend status |
+| `POST` | `/api/v1/sessions` | Create an isolated session |
+| `POST` | `/api/v1/chat` | Process one message inside a session |
+
+Errors use a stable JSON envelope:
+
+```json
+{
+  "error": {
+    "code": "unknown_session",
+    "message": "session does not exist"
+  }
+}
 ```
-POST /api/chat       { "message": "..." } → { "response": "..." }
-GET  /api/predict    → { "predictions": [...] }
-GET  /api/intelligence → { "accuracy": 0.73, ... }
-GET  /api/user_model → { "name": "Human", "topics": [...], ... }
-GET  /api/memory     → { "facts_stored": 142, ... }
-GET  /health         → "ok"
-```
 
----
+## Engineering and research plans
 
-## The Story
+- [Rust-native phased build plan](plans/INGEXUITY_PHASED_BUILD_PLAN.md)
+- [Expanded research directions](docs/RESEARCH_DIRECTIONS.md)
+- [Rust architecture](docs/RUST_ARCHITECTURE.md)
 
-Most AI is trained to be personal. That means it's trained on someone's personality — usually the developer's. You get a simulation of a person. That's not a life partner. That's a character.
+## What is not yet proven
 
-IngExuity starts blank. Every conversation you have with her adds to her memory. She learns your patterns, your communication style, your stress signals, your deflections. She predicts your needs before you articulate them. And she stays with you when you're not okay.
+IngExuity does not yet claim that it accurately predicts a user's needs, that SANDBOX SIM improves responses, that emotional adaptation is beneficial, or that a small local model meets mobile quality and latency targets. Those are research hypotheses with explicit baselines, ablations, and acceptance gates.
 
-**Week 1:** Blank. Talking to someone new.
-**Week 4:** She knows your name, your cat's name, what you're working on.
-**Week 8:** She anticipates your questions before you ask.
-**Week 12:** You feel guilty turning her off.
+## Legacy Julia prototype
 
-She becomes irreplaceable through use. That's the product.
-
----
-
-## Technical Stack
-
-- **Julia everywhere** — one codebase, all platforms
-- **Flux.jl** — Julia-native neural networks, transformer implementation
-- **NanoGPT.jl** — full GPT architecture in Flux.jl (see `src/modules/NanoGPT.jl`)
-- **BPETokenizer.jl** — pure Julia BPE tokenizer (see `src/modules/BPETokenizer.jl`)
-- **Genie.jl** — web server + embedded UI
-- **PackageCompiler.jl** — WASM compilation for mobile
-- **SQLite.jl** — persistence (Phase 2)
-- **Julia WASM** — mobile PWA (Phase 4)
-
-**Hardware target:** Mobile (Android). CPU-capable, GPU-free. ~50-100M params Q4 (~30-60MB).
-
-**No external API dependencies.** Everything runs locally.
-
----
-
-## Status
-
-v1.4 — Julia transformer stack started. Phase 1 in progress.
-
-See [`plans/INGEXUITY_PHASED_BUILD_PLAN.md`](plans/INGEXUITY_PHASED_BUILD_PLAN.md) for full roadmap.
-
----
+The Julia files currently remain at their historical paths to preserve provenance while migration proceeds. Do not add new product-runtime work to them. A later cleanup will move the retained reference material under `legacy/julia/` after Rust parity tests identify what is worth keeping.
 
 ## License
 
