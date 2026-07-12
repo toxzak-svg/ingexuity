@@ -29,24 +29,17 @@ jobs:
           path = Path('crates/ingexuity-server/src/lib.rs')
           source = path.read_text(encoding='utf-8')
 
-          anchor = '''    pub async fn count(&self) -> usize {
-              self.sweep_expired().await;
-              self.sessions.read().await.len()
-          }
-          '''.replace('          ', '')
-          replacement = '''    #[must_use]
-          pub fn ttl_seconds(&self) -> u64 {
-              self.ttl_ms.div_ceil(1000)
-          }
+          anchor = '    pub async fn count(&self) -> usize {'
+          inserted = '''    #[must_use]
+              pub fn ttl_seconds(&self) -> u64 {
+                  self.ttl_ms.div_ceil(1000)
+              }
 
-          pub async fn count(&self) -> usize {
-              self.sweep_expired().await;
-              self.sessions.read().await.len()
-          }
-          '''.replace('          ', '')
+              pub async fn count(&self) -> usize {
+          '''.replace('              ', '')
           if source.count(anchor) != 1:
               raise SystemExit(f'count anchor occurrences: {source.count(anchor)}')
-          source = source.replace(anchor, replacement, 1)
+          source = source.replace(anchor, inserted.rstrip('\n'), 1)
 
           old = '            expires_in_seconds: DEFAULT_SESSION_TTL.as_secs(),'
           new = '            expires_in_seconds: state.sessions.ttl_seconds(),'
