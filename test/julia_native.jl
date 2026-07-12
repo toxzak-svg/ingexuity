@@ -100,7 +100,7 @@ end
         @test NanoGPT.decode(tokenizer, NanoGPT.encode(tokenizer, sample)) == sample
     end
 
-    trained = NanoGPT.train(["abababab", "abab"]; vocab_size=264)
+    trained = NanoGPT.train(["abababab", "abab"], 264)
     @test NanoGPT.decode(trained, NanoGPT.encode(trained, "abab")) == "abab"
 end
 
