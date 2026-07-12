@@ -6,7 +6,7 @@ on:
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: rust-ci-${{ github.ref }}
@@ -17,85 +17,45 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - name: Check out pull request head
+      - name: Check out repository
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.ref }}
 
-      - name: Install Rust toolchain
+      - name: Install Rust 1.97
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.97.0
           components: rustfmt, clippy
 
-      - name: Create diagnostics directory
-        run: mkdir -p ci-artifacts
-
-      - name: Format and resolve lockfile
-        run: |
-          cargo fmt --all
-          cargo generate-lockfile
-
-      - name: Commit generated Rust files once
-        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Cargo.lock crates/**/*.rs
-          if git diff --cached --quiet; then
-            echo "Generated Rust files already committed."
-          else
-            git commit -m "build: commit Cargo lockfile and rustfmt output"
-            git push origin HEAD:${{ github.event.pull_request.head.ref }}
-          fi
+      - name: Check formatting
+        run: cargo fmt --all -- --check
 
       - name: Lint
-        id: lint
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -o pipefail
-          cargo clippy --locked --workspace --all-targets --all-features -- -D warnings 2>&1 | tee ci-artifacts/clippy.log
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
       - name: Test
-        id: test
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -o pipefail
-          cargo test --locked --workspace --all-features 2>&1 | tee ci-artifacts/test.log
+        run: cargo test --locked --workspace --all-features
 
       - name: Build release binary
-        id: build
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -o pipefail
-          cargo build --locked --workspace --release 2>&1 | tee ci-artifacts/build.log
+        run: cargo build --locked --workspace --release
 
       - name: Start model-free server
-        id: smoke
-        if: ${{ always() && steps.build.outcome == 'success' }}
-        continue-on-error: true
         run: |
-          target/release/ingexuity-server > ci-artifacts/server.log 2>&1 &
+          target/release/ingexuity-server > /tmp/ingexuity.log 2>&1 &
           echo $! > /tmp/ingexuity.pid
           for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:8000/health > ci-artifacts/health.json; then
+            if curl --fail --silent http://127.0.0.1:8000/health > /tmp/health.json; then
               exit 0
             fi
             sleep 1
           done
-          cat ci-artifacts/server.log
+          cat /tmp/ingexuity.log
           exit 1
 
       - name: Verify health contract
-        id: health
-        if: ${{ always() && steps.smoke.outcome == 'success' }}
-        continue-on-error: true
         run: |
           python3 - <<'PY'
           import json
-          with open('ci-artifacts/health.json', encoding='utf-8') as handle:
+          with open('/tmp/health.json', encoding='utf-8') as handle:
               health = json.load(handle)
           assert health['status'] == 'ok', health
           assert health['runtime'] == 'rust', health
@@ -108,27 +68,7 @@ jobs:
           if [ -f /tmp/ingexuity.pid ]; then
             kill "$(cat /tmp/ingexuity.pid)" || true
           fi
-          cat ci-artifacts/server.log || true
-
-      - name: Upload Rust diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: rust-diagnostics
-          if-no-files-found: warn
-          path: |
-            Cargo.lock
-            crates/**/*.rs
-            ci-artifacts/**
-
-      - name: Enforce test outcomes
-        if: always()
-        run: |
-          test "${{ steps.lint.outcome }}" = success
-          test "${{ steps.test.outcome }}" = success
-          test "${{ steps.build.outcome }}" = success
-          test "${{ steps.smoke.outcome }}" = success
-          test "${{ steps.health.outcome }}" = success
+          cat /tmp/ingexuity.log || true
 
   container:
     runs-on: ubuntu-latest
@@ -137,44 +77,19 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Create diagnostics directory
-        run: mkdir -p ci-artifacts
-
       - name: Build model-free image
-        id: docker_build
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -o pipefail
-          docker build --tag ingexuity:ci . 2>&1 | tee ci-artifacts/docker-build.log
+        run: docker build --tag ingexuity:ci .
 
       - name: Smoke test container
-        id: docker_smoke
-        if: ${{ always() && steps.docker_build.outcome == 'success' }}
-        continue-on-error: true
         run: |
           docker run --detach --rm --name ingexuity-ci -p 8000:8000 ingexuity:ci
           for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:8000/health > ci-artifacts/container-health.json; then
+            if curl --fail --silent http://127.0.0.1:8000/health > /tmp/container-health.json; then
               docker stop ingexuity-ci
               exit 0
             fi
             sleep 1
           done
-          docker logs ingexuity-ci | tee ci-artifacts/container.log
+          docker logs ingexuity-ci
           docker stop ingexuity-ci || true
           exit 1
-
-      - name: Upload container diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: container-diagnostics
-          if-no-files-found: warn
-          path: ci-artifacts/**
-
-      - name: Enforce container outcomes
-        if: always()
-        run: |
-          test "${{ steps.docker_build.outcome }}" = success
-          test "${{ steps.docker_smoke.outcome }}" = success
