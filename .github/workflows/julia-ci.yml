@@ -1,0 +1,41 @@
+name: Julia CI
+
+on:
+  push:
+    branches: [julia-main]
+  pull_request:
+    branches: [julia-main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: julia-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out Julia branch head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Install Julia 1.12
+        uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.12'
+
+      - name: Cache Julia artifacts
+        uses: julia-actions/cache@v2
+
+      - name: Instantiate and precompile
+        run: julia --project=. --color=yes -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()'
+
+      - name: Run package and Julia-native model tests
+        run: julia --project=. --color=yes -e 'using Pkg; Pkg.test(; coverage=true)'
+
+      - name: Verify package load without a downloaded model
+        run: julia --project=. --color=yes -e 'using IngExuity; @assert !IngExuity.is_local_loaded()'
