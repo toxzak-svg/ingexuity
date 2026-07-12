@@ -1,6 +1,5 @@
 # ============================================================================
-# NanoGPT.jl — Pure Julia NanoGPT for IngExuity
-# Drop-in replacement for Flux-based NanoGPT
+# NanoGPT.jl — Pure Julia transformer research baseline for IngExuity
 # ============================================================================
 module NanoGPT
 
@@ -9,7 +8,10 @@ using Statistics
 import StatsBase
 using JSON
 
-export TransformerModel, TransformerConfig, SimpleTokenizer, generate, chat_local
+export TransformerModel, TransformerConfig, SimpleTokenizer, GPT2Tokenizer
+export generate, chat_local, forward_all, cross_entropy_loss, param_count
+export load_model, load_tokenizer, load_local_model, load_pretrained, is_loaded
+export encode, decode, train
 
 # ============================================================================
 # Configuration
@@ -26,52 +28,79 @@ Base.@kwdef mutable struct TransformerConfig
     bias::Bool = true
 end
 
+function validate_config(cfg::TransformerConfig)
+    cfg.vocab_size > 1 || throw(ArgumentError("vocab_size must be greater than one"))
+    cfg.max_seq_len > 0 || throw(ArgumentError("max_seq_len must be positive"))
+    cfg.n_embed > 0 || throw(ArgumentError("n_embed must be positive"))
+    cfg.n_heads > 0 || throw(ArgumentError("n_heads must be positive"))
+    cfg.n_layers > 0 || throw(ArgumentError("n_layers must be positive"))
+    cfg.n_hidden > 0 || throw(ArgumentError("n_hidden must be positive"))
+    cfg.n_embed % cfg.n_heads == 0 ||
+        throw(ArgumentError("n_embed must be divisible by n_heads"))
+    0.0f0 <= cfg.dropout < 1.0f0 ||
+        throw(ArgumentError("dropout must be in [0, 1)"))
+    return cfg
+end
+
+"""Return the number of independently stored model parameters.
+
+The token embedding and language-model head are tied and therefore counted once.
+"""
 function param_count(cfg::TransformerConfig)::Int
-    vocab = cfg.vocab_size * cfg.n_embed
-    pos = cfg.max_seq_len * cfg.n_embed
-    attn = cfg.n_layers * (
-        3 * cfg.n_embed * cfg.n_embed +
-        cfg.n_embed * cfg.n_embed +
-        2 * cfg.n_embed
-    )
-    ffn = cfg.n_layers * (
-        2 * cfg.n_embed * cfg.n_hidden +
-        2 * cfg.n_embed
-    )
-    head = cfg.vocab_size * cfg.n_embed
-    total = vocab + pos + attn + ffn + head + 2 * cfg.n_embed
-    return total
+    validate_config(cfg)
+    d = cfg.n_embed
+    h = cfg.n_hidden
+    bias_count = cfg.bias ? 1 : 0
+
+    embeddings = cfg.vocab_size * d + cfg.max_seq_len * d
+    attention_per_layer = 4 * d * d + bias_count * 4 * d
+    ffn_per_layer = 2 * d * h + bias_count * (h + d)
+    norms_per_layer = 2 * (d + bias_count * d)
+    final_norm = d + bias_count * d
+
+    return embeddings + cfg.n_layers * (
+        attention_per_layer + ffn_per_layer + norms_per_layer
+    ) + final_norm
 end
 
 # ============================================================================
-# Activation functions
+# Numerics
 # ============================================================================
 
-gelu(x) = @. 0.5 * x * (1 + tanh(√(2/π) * (x + 0.044715 * x^3)))
+gelu(x) = @. 0.5f0 * x * (1.0f0 + tanh(sqrt(2.0f0 / Float32(pi)) * (x + 0.044715f0 * x^3)))
 
-function softmax!(out::AbstractVecOrMat, x::AbstractVecOrMat)
-    if size(x) == size(out)
-        copy!(out, x)
-    else
-        out .= x
-    end
-    out_exp = exp.(out .- maximum(out, dims=1))
-    out ./= sum(out_exp, dims=1)
+function softmax!(out::AbstractVector, x::AbstractVector)
+    axes(out) == axes(x) || throw(DimensionMismatch("softmax output must match input"))
+    max_x = maximum(x)
+    out .= exp.(x .- max_x)
+    denominator = sum(out)
+    isfinite(denominator) && denominator > zero(denominator) ||
+        throw(ArgumentError("softmax denominator is not finite and positive"))
+    out ./= denominator
     return out
 end
 
-function softmax(x::AbstractVecOrMat)
-    return softmax!(similar(x), x)
+softmax(x::AbstractVector) = softmax!(similar(x), x)
+
+function row_softmax!(scores::AbstractMatrix)
+    row_max = maximum(scores; dims=2)
+    scores .= exp.(scores .- row_max)
+    row_sums = sum(scores; dims=2)
+    all(isfinite, row_sums) || throw(ArgumentError("attention softmax produced non-finite rows"))
+    all(value -> value > zero(eltype(row_sums)), row_sums) ||
+        throw(ArgumentError("attention softmax produced an empty row"))
+    scores ./= row_sums
+    return scores
+end
+
+function add_bias(x::AbstractMatrix, bias::AbstractVector)
+    isempty(bias) && return x
+    length(bias) == size(x, 1) || throw(DimensionMismatch("bias does not match projection"))
+    return x .+ reshape(bias, :, 1)
 end
 
 # ============================================================================
-# Matrix multiplication helpers
-# ============================================================================
-
-matmul(x, w) = x * w
-
-# ============================================================================
-# Layer Normalization
+# Layer normalization
 # ============================================================================
 
 struct LayerNorm
@@ -82,23 +111,31 @@ struct LayerNorm
 end
 
 function LayerNorm(n::Int; bias::Bool=true, eps::Float32=1f-5)
+    n > 0 || throw(ArgumentError("LayerNorm width must be positive"))
     return LayerNorm(
         ones(Float32, n),
         bias ? zeros(Float32, n) : Float32[],
         eps,
-        n
+        n,
     )
 end
 
-function (ln::LayerNorm)(x::AbstractMatrix{Float32})::AbstractMatrix{Float32}
-    m = Statistics.mean(x, dims=2)
-    v = Statistics.var(x, dims=2, corrected=true)
-    x_norm = (x .- m) ./ sqrt.(v .+ ln.eps)
-    return ln.weight .* x_norm .+ ln.bias
+function (ln::LayerNorm)(x::AbstractMatrix{<:AbstractFloat})::Matrix{Float32}
+    size(x, 1) == ln.n ||
+        throw(DimensionMismatch("LayerNorm expected $(ln.n) features, got $(size(x, 1))"))
+
+    xf = Float32.(x)
+    token_means = Statistics.mean(xf; dims=1)
+    centered = xf .- token_means
+    token_variances = sum(abs2, centered; dims=1) ./ Float32(size(xf, 1))
+    normalized = centered ./ sqrt.(token_variances .+ ln.eps)
+    scaled = reshape(ln.weight, :, 1) .* normalized
+    return isempty(ln.bias) ? Matrix{Float32}(scaled) :
+           Matrix{Float32}(scaled .+ reshape(ln.bias, :, 1))
 end
 
 # ============================================================================
-# Causal Self-Attention
+# Causal self-attention
 # ============================================================================
 
 struct CausalAttention
@@ -115,77 +152,74 @@ struct CausalAttention
     scale::Float32
 end
 
-function CausalAttention(n_embed::Int, n_heads::Int)
-    @assert n_embed % n_heads == 0
+function CausalAttention(
+    n_embed::Int,
+    n_heads::Int;
+    rng::AbstractRNG=Random.default_rng(),
+    bias::Bool=true,
+)
+    n_embed % n_heads == 0 || throw(ArgumentError("n_embed must be divisible by n_heads"))
     head_dim = n_embed ÷ n_heads
-    scale = Float32(1.0 / sqrt(head_dim))
+    scale = inv(sqrt(Float32(head_dim)))
 
-    rng = Random.Xoshiro(42)
-    Wq = randn(rng, Float32, n_embed, n_embed) * 0.02f0
-    Wk = randn(rng, Float32, n_embed, n_embed) * 0.02f0
-    Wv = randn(rng, Float32, n_embed, n_embed) * 0.02f0
-    Wo = randn(rng, Float32, n_embed, n_embed) * 0.02f0
-    bq = zeros(Float32, n_embed)
-    bk = zeros(Float32, n_embed)
-    bv = zeros(Float32, n_embed)
-    bo = zeros(Float32, n_embed)
+    Wq = randn(rng, Float32, n_embed, n_embed) .* 0.02f0
+    Wk = randn(rng, Float32, n_embed, n_embed) .* 0.02f0
+    Wv = randn(rng, Float32, n_embed, n_embed) .* 0.02f0
+    Wo = randn(rng, Float32, n_embed, n_embed) .* 0.02f0
+    bq = bias ? zeros(Float32, n_embed) : Float32[]
+    bk = bias ? zeros(Float32, n_embed) : Float32[]
+    bv = bias ? zeros(Float32, n_embed) : Float32[]
+    bo = bias ? zeros(Float32, n_embed) : Float32[]
 
     return CausalAttention(Wq, Wk, Wv, Wo, bq, bk, bv, bo, n_heads, head_dim, scale)
 end
 
-function (attn::CausalAttention)(x::AbstractMatrix{Float32})::AbstractMatrix{Float32}
-    n_embed, T = size(x)
-    n_heads = attn.n_heads
-    head_dim = attn.head_dim
-
-    Q = attn.Wq' * x .+ attn.bq
-    K = attn.Wk' * x .+ attn.bk
-    V = attn.Wv' * x .+ attn.bv
-
-    Q_seq = reshape(Q, n_heads, head_dim, T)
-    K_seq = reshape(K, n_heads, head_dim, T)
-    V_seq = reshape(V, n_heads, head_dim, T)
-
-    attn_scores = zeros(Float32, T, T, n_heads)
-    for h in 1:n_heads
-        for i in 1:T
-            for j in 1:T
-                if j <= i
-                    attn_scores[i, j, h] = attn.scale * sum(Q_seq[h, :, i] .* K_seq[h, :, j])
-                end
-            end
+function causal_mask(sequence_length::Int)::Matrix{Float32}
+    mask = zeros(Float32, sequence_length, sequence_length)
+    @inbounds for query_position in 1:sequence_length
+        for key_position in (query_position + 1):sequence_length
+            mask[query_position, key_position] = -Inf32
         end
     end
+    return mask
+end
 
-    attn_weights = zeros(Float32, T, T, n_heads)
-    for h in 1:n_heads
-        for i in 1:T
-            row_sum = sum(exp(attn_scores[i, j, h]) for j in 1:T if j <= i)
-            for j in 1:T
-                if j <= i
-                    attn_weights[i, j, h] = exp(attn_scores[i, j, h]) / row_sum
-                end
-            end
-        end
+function (attn::CausalAttention)(x::AbstractMatrix{<:AbstractFloat})::Matrix{Float32}
+    n_embed, sequence_length = size(x)
+    expected_width = attn.n_heads * attn.head_dim
+    n_embed == expected_width ||
+        throw(DimensionMismatch("attention expected $expected_width features, got $n_embed"))
+
+    xf = Float32.(x)
+    queries = add_bias(transpose(attn.Wq) * xf, attn.bq)
+    keys = add_bias(transpose(attn.Wk) * xf, attn.bk)
+    values = add_bias(transpose(attn.Wv) * xf, attn.bv)
+
+    mask = causal_mask(sequence_length)
+    output = zeros(Float32, n_embed, sequence_length)
+
+    # The only explicit model loop is over heads. Token interactions and value
+    # aggregation use matrix multiplication instead of scalar triple loops.
+    @inbounds for head in 1:attn.n_heads
+        first_feature = (head - 1) * attn.head_dim + 1
+        features = first_feature:(first_feature + attn.head_dim - 1)
+        q = @view queries[features, :]
+        k = @view keys[features, :]
+        v = @view values[features, :]
+
+        scores = Matrix{Float32}(transpose(q) * k)
+        scores .*= attn.scale
+        scores .+= mask
+        row_softmax!(scores)
+
+        output[features, :] .= v * transpose(scores)
     end
 
-    out = zeros(Float32, n_embed, T)
-    for h in 1:n_heads
-        for i in 1:T
-            for j in 1:T
-                if j <= i
-                    out[h*head_dim-(head_dim-1):h*head_dim, i] .+=
-                        attn_weights[i, j, h] .* V_seq[h, :, j]
-                end
-            end
-        end
-    end
-
-    return attn.Wo' * out .+ attn.bo
+    return Matrix{Float32}(add_bias(transpose(attn.Wo) * output, attn.bo))
 end
 
 # ============================================================================
-# Feed-Forward Network
+# Feed-forward network
 # ============================================================================
 
 struct FeedForward
@@ -196,21 +230,26 @@ struct FeedForward
     activation::Function
 end
 
-function FeedForward(n_embed::Int, n_hidden::Int)
-    rng = Random.Xoshiro(42)
-    W1 = randn(rng, Float32, n_hidden, n_embed) * 0.02f0
-    b1 = zeros(Float32, n_hidden)
-    W2 = randn(rng, Float32, n_embed, n_hidden) * 0.02f0
-    b2 = zeros(Float32, n_embed)
+function FeedForward(
+    n_embed::Int,
+    n_hidden::Int;
+    rng::AbstractRNG=Random.default_rng(),
+    bias::Bool=true,
+)
+    W1 = randn(rng, Float32, n_hidden, n_embed) .* 0.02f0
+    b1 = bias ? zeros(Float32, n_hidden) : Float32[]
+    W2 = randn(rng, Float32, n_embed, n_hidden) .* 0.02f0
+    b2 = bias ? zeros(Float32, n_embed) : Float32[]
     return FeedForward(W1, b1, W2, b2, gelu)
 end
 
-function (ff::FeedForward)(x::AbstractMatrix{Float32})::AbstractMatrix{Float32}
-    return ff.W2 * ff.activation.(ff.W1 * x .+ ff.b1) .+ ff.b2
+function (ff::FeedForward)(x::AbstractMatrix{<:AbstractFloat})::Matrix{Float32}
+    hidden = ff.activation(add_bias(ff.W1 * Float32.(x), ff.b1))
+    return Matrix{Float32}(add_bias(ff.W2 * hidden, ff.b2))
 end
 
 # ============================================================================
-# Transformer Block
+# Transformer block
 # ============================================================================
 
 struct TransformerBlock
@@ -220,23 +259,28 @@ struct TransformerBlock
     ln2::LayerNorm
 end
 
-function TransformerBlock(n_embed::Int, n_heads::Int, n_hidden::Int)
+function TransformerBlock(
+    n_embed::Int,
+    n_heads::Int,
+    n_hidden::Int;
+    rng::AbstractRNG=Random.default_rng(),
+    bias::Bool=true,
+)
     return TransformerBlock(
-        CausalAttention(n_embed, n_heads),
-        FeedForward(n_embed, n_hidden),
-        LayerNorm(n_embed),
-        LayerNorm(n_embed)
+        CausalAttention(n_embed, n_heads; rng=rng, bias=bias),
+        FeedForward(n_embed, n_hidden; rng=rng, bias=bias),
+        LayerNorm(n_embed; bias=bias),
+        LayerNorm(n_embed; bias=bias),
     )
 end
 
-function (block::TransformerBlock)(x::AbstractMatrix{Float32})::AbstractMatrix{Float32}
-    x = x .+ block.attn(block.ln1(x))
-    x = x .+ block.ff(block.ln2(x))
-    return x
+function (block::TransformerBlock)(x::AbstractMatrix{<:AbstractFloat})::Matrix{Float32}
+    after_attention = Float32.(x) .+ block.attn(block.ln1(x))
+    return after_attention .+ block.ff(block.ln2(after_attention))
 end
 
 # ============================================================================
-# Full Transformer Model
+# Full transformer model
 # ============================================================================
 
 struct TransformerModel
@@ -248,401 +292,404 @@ struct TransformerModel
     lm_head::Matrix{Float32}
 end
 
-function TransformerModel(config::TransformerConfig)
-    rng = Random.Xoshiro(42)
+function TransformerModel(
+    config::TransformerConfig;
+    rng::AbstractRNG=Random.Xoshiro(42),
+)
+    validate_config(config)
     n = config.n_embed
 
-    token_embedding = randn(rng, Float32, config.vocab_size, n) * 0.02f0
-    position_embedding = randn(rng, Float32, config.max_seq_len, n) * 0.02f0
+    token_embedding = randn(rng, Float32, config.vocab_size, n) .* 0.02f0
+    position_embedding = randn(rng, Float32, config.max_seq_len, n) .* 0.02f0
+    blocks = [
+        TransformerBlock(
+            n,
+            config.n_heads,
+            config.n_hidden;
+            rng=rng,
+            bias=config.bias,
+        ) for _ in 1:config.n_layers
+    ]
+    final_ln = LayerNorm(n; bias=config.bias)
 
-    blocks = [TransformerBlock(n, config.n_heads, config.n_hidden) for _ in 1:config.n_layers]
-    final_ln = LayerNorm(n)
-
+    # Weight tying is an alias, not a second independently stored matrix.
     lm_head = token_embedding
-
     return TransformerModel(
         config,
         token_embedding,
         position_embedding,
         blocks,
         final_ln,
-        lm_head
+        lm_head,
     )
 end
 
-function (model::TransformerModel)(tokens::AbstractMatrix{Int})::AbstractMatrix{Float32}
-    cfg = model.config
-    T = size(tokens, 1)
+function validate_tokens(model::TransformerModel, tokens::AbstractVector{<:Integer})
+    isempty(tokens) && throw(ArgumentError("at least one token is required"))
+    length(tokens) <= model.config.max_seq_len ||
+        throw(ArgumentError("sequence exceeds max_seq_len=$(model.config.max_seq_len)"))
+    all(token -> 0 <= token < model.config.vocab_size, tokens) ||
+        throw(ArgumentError("token IDs must be in 0:$(model.config.vocab_size - 1)"))
+    return tokens
+end
 
-    x = model.token_embedding[tokens .+ 1, :]'
-    x = x .+ model.position_embedding[1:T, :]'
+"""Return logits for every input position as `vocab_size × sequence_length`."""
+function forward_all(
+    model::TransformerModel,
+    tokens::AbstractVector{<:Integer},
+)::Matrix{Float32}
+    validate_tokens(model, tokens)
+    sequence_length = length(tokens)
+    embedding_rows = Int.(tokens) .+ 1
+
+    x = permutedims(model.token_embedding[embedding_rows, :])
+    x .+= permutedims(model.position_embedding[1:sequence_length, :])
 
     for block in model.blocks
         x = block(x)
     end
 
     x = model.final_ln(x)
-    logits = model.lm_head * x
-
-    return logits
+    return Matrix{Float32}(model.lm_head * x)
 end
 
-function (model::TransformerModel)(tokens::AbstractVector{Int})::AbstractVector{Float32}
-    T = length(tokens)
-    x = model.token_embedding[tokens .+ 1, :]'
-    x = x .+ model.position_embedding[1:T, :]'
+"""Return next-token logits for the final input position."""
+function (model::TransformerModel)(tokens::AbstractVector{<:Integer})::Vector{Float32}
+    logits = forward_all(model, tokens)
+    return Vector{Float32}(logits[:, end])
+end
 
-    for block in model.blocks
-        x = block(x)
+"""Evaluate a `sequence_length × batch_size` token matrix."""
+function (model::TransformerModel)(tokens::AbstractMatrix{<:Integer})::Array{Float32,3}
+    sequence_length, batch_size = size(tokens)
+    sequence_length > 0 && batch_size > 0 || throw(ArgumentError("token batch cannot be empty"))
+    outputs = Array{Float32}(undef, model.config.vocab_size, sequence_length, batch_size)
+    for batch_index in 1:batch_size
+        outputs[:, :, batch_index] .= forward_all(model, @view(tokens[:, batch_index]))
     end
-
-    x = model.final_ln(x)
-    logits = model.lm_head * x
-
-    return logits[:, 1]
+    return outputs
 end
 
-function generate(model::TransformerModel, tokenizer, seed::String;
-                  max_new_tokens::Int=100, temperature::Float32=1.0f0,
-                  top_k::Int=40, rng=Random.Xoshiro(42))::String
+function cross_entropy_loss(
+    logits::AbstractMatrix{<:AbstractFloat},
+    targets::AbstractVector{<:Integer},
+)::Float32
+    size(logits, 2) == length(targets) ||
+        throw(DimensionMismatch("one target is required for each logit column"))
+    isempty(targets) && throw(ArgumentError("targets cannot be empty"))
+    vocab_size = size(logits, 1)
+    all(target -> 0 <= target < vocab_size, targets) ||
+        throw(ArgumentError("target token is outside the vocabulary"))
+
+    total = 0.0f0
+    for position in eachindex(targets)
+        column = @view logits[:, position]
+        max_logit = maximum(column)
+        log_partition = max_logit + log(sum(exp.(column .- max_logit)))
+        total += Float32(log_partition - column[Int(targets[position]) + 1])
+    end
+    return total / Float32(length(targets))
+end
+
+function cross_entropy_loss(
+    model::TransformerModel,
+    inputs::AbstractVector{<:Integer},
+    targets::AbstractVector{<:Integer},
+)::Float32
+    return cross_entropy_loss(forward_all(model, inputs), targets)
+end
+
+function generate(
+    model::TransformerModel,
+    tokenizer,
+    seed::String;
+    max_new_tokens::Int=100,
+    temperature::Float32=1.0f0,
+    top_k::Int=40,
+    rng::AbstractRNG=Random.Xoshiro(42),
+)::String
+    max_new_tokens >= 0 || throw(ArgumentError("max_new_tokens cannot be negative"))
+    temperature > 0.0f0 || throw(ArgumentError("temperature must be positive"))
+    top_k >= 0 || throw(ArgumentError("top_k cannot be negative"))
 
     tokens = encode(tokenizer, seed)
-    max_len = min(model.config.max_seq_len, length(tokens) + max_new_tokens)
+    isempty(tokens) && throw(ArgumentError("seed must encode to at least one token"))
 
-    while length(tokens) < max_len
-        context = tokens[max(1, end-model.config.max_seq_len+1):end]
+    for _ in 1:max_new_tokens
+        context_start = max(1, length(tokens) - model.config.max_seq_len + 1)
+        context = @view tokens[context_start:end]
         logits = model(context) ./ temperature
 
-        if top_k > 0 && top_k < length(logits)
-            sorted_idx = sortperm(logits, rev=true)
-            keep_idx = sorted_idx[1:top_k]
-            filtered_logits = Float32[-Inf for _ in 1:length(logits)]
-            for i in keep_idx
-                filtered_logits[i] = logits[i]
-            end
-            logits = filtered_logits
+        if 0 < top_k < length(logits)
+            keep = partialsortperm(logits, 1:top_k; rev=true)
+            filtered = fill(-Inf32, length(logits))
+            filtered[keep] .= logits[keep]
+            logits = filtered
         end
 
-        probs = softmax(logits)
-        probs = max.(probs, Float32(1e-10))
-        probs = probs ./ sum(probs)
-        next_token = StatsBase.sample(rng, 1:length(probs), StatsBase.Weights(probs))
-
+        probabilities = softmax(logits)
+        sampled_index = StatsBase.sample(rng, eachindex(probabilities), StatsBase.Weights(probabilities))
+        next_token = Int(sampled_index) - 1
         push!(tokens, next_token)
 
-        if next_token == tokenizer.eot_token
-            break
-        end
+        next_token == tokenizer.eot_token && break
     end
 
     return decode(tokenizer, tokens)
 end
 
-function Base.show(io::IO, m::TransformerModel)
-    cfg = m.config
+function Base.show(io::IO, model::TransformerModel)
+    cfg = model.config
     params = param_count(cfg)
     println(io, "TransformerModel($(cfg.n_layers) layers, $(cfg.n_heads) heads, $(cfg.n_embed) embed)")
-    println(io, "  → ~$(round(params/1e6, digits=1))M params, $(cfg.vocab_size) vocab, $(cfg.max_seq_len) ctx)")
+    println(io, "  → ~$(round(params / 1e6; digits=1))M stored params, $(cfg.vocab_size) vocab, $(cfg.max_seq_len) ctx")
 end
 
 # ============================================================================
-# Simple BPE Tokenizer
+# Simple byte-level BPE tokenizer
 # ============================================================================
 
 struct SimpleTokenizer
-    vocab::Dict{Vector{Int}, Int}
+    vocab::Dict{Vector{Int},Int}
     reverse_vocab::Vector{Vector{Int}}
     eot_token::Int
     eot_byte::Vector{Int}
 end
 
-function SimpleTokenizer(vocab_size::Int=5000; rng=Random.Xoshiro(42))
-    @assert vocab_size >= 256
+function SimpleTokenizer(vocab_size::Int=5000; rng::AbstractRNG=Random.Xoshiro(42))
+    vocab_size >= 257 || throw(ArgumentError("vocab_size must cover 256 bytes plus EOT"))
+    _ = rng # Reserved for deterministic tokenizer-training extensions.
 
-    vocab = Dict{Vector{Int}, Int}()
+    vocab = Dict{Vector{Int},Int}()
     reverse_vocab = Vector{Vector{Int}}()
-
-    for i in 0:255
-        vocab[[i]] = i + 1
-        push!(reverse_vocab, [i])
+    for byte in 0:255
+        vocab[[byte]] = byte
+        push!(reverse_vocab, [byte])
     end
 
     eot_token = vocab_size - 1
-    push!(reverse_vocab, [256])
-    vocab[[256]] = eot_token
-
     return SimpleTokenizer(vocab, reverse_vocab, eot_token, [256])
 end
 
-function _get_stats(freqs::Vector{Dict{Vector{Int}, Int}})
-    pairs = Dict{Vector{Int}, Int}()
-    for freqs_dict in freqs
-        for (pair, count) in freqs_dict
-            pairs[pair] = get(pairs, pair, 0) + count
+function get_pair_counts(sequences::Vector{Dict{Vector{Int},Int}})
+    pairs = Dict{Tuple{Int,Int},Int}()
+    for sequence_counts in sequences
+        for (tokens, count) in sequence_counts
+            for index in 1:(length(tokens) - 1)
+                pair = (tokens[index], tokens[index + 1])
+                pairs[pair] = get(pairs, pair, 0) + count
+            end
         end
     end
     return pairs
 end
 
-function _merge_pair!(freqs::Vector{Dict{Vector{Int}, Int}}, pair::Vector{Int}, new_id::Int)
-    for freqs_dict in freqs
-        new_freqs = Dict{Vector{Int}, Int}()
-        for (tokens, count) in freqs_dict
-            new_tokens = Int[]
-            i = 1
-            while i <= length(tokens)
-                if i < length(tokens) && tokens[i] == pair[1] && tokens[i+1] == pair[2]
-                    push!(new_tokens, new_id)
-                    i += 2
+function merge_pair!(
+    sequences::Vector{Dict{Vector{Int},Int}},
+    pair::Tuple{Int,Int},
+    new_id::Int,
+)
+    for sequence_counts in sequences
+        replacements = Dict{Vector{Int},Int}()
+        for (tokens, count) in sequence_counts
+            merged = Int[]
+            index = 1
+            while index <= length(tokens)
+                if index < length(tokens) &&
+                   tokens[index] == pair[1] && tokens[index + 1] == pair[2]
+                    push!(merged, new_id)
+                    index += 2
                 else
-                    push!(new_tokens, tokens[i])
-                    i += 1
+                    push!(merged, tokens[index])
+                    index += 1
                 end
             end
-            new_freqs[new_tokens] = count
+            replacements[merged] = get(replacements, merged, 0) + count
         end
-        empty!(freqs_dict)
-        for (k, v) in new_freqs
-            freqs_dict[k] = v
-        end
+        empty!(sequence_counts)
+        merge!(sequence_counts, replacements)
     end
+    return sequences
 end
 
-function train(texts::Vector{String}, vocab_size::Int=5000; rng=Random.Xoshiro(42))
-    tokenizer = SimpleTokenizer(vocab_size, rng=rng)
-
-    freqs = [Dict{Vector{Int}, Int}() for _ in 1:length(texts)]
-
-    for (i, text) in enumerate(texts)
-        tokens = vcat([[Int(c) for c in text]..., [256]])
-        freqs[i][tokens] = 1
+function train(
+    texts::Vector{String},
+    vocab_size::Int=5000;
+    rng::AbstractRNG=Random.Xoshiro(42),
+)
+    tokenizer = SimpleTokenizer(vocab_size; rng=rng)
+    sequences = [Dict{Vector{Int},Int}() for _ in eachindex(texts)]
+    for (index, text) in pairs(texts)
+        bytes = Int.(collect(codeunits(text)))
+        isempty(bytes) || (sequences[index][bytes] = 1)
     end
 
-    current_id = 257
-    target_size = vocab_size - 1
+    current_id = 256
+    final_merge_id = tokenizer.eot_token - 1
+    while current_id <= final_merge_id
+        pair_counts = get_pair_counts(sequences)
+        isempty(pair_counts) && break
+        best_pair = argmax(pair_counts)
+        pair_counts[best_pair] >= 2 || break
 
-    while current_id <= target_size
-        pairs = _get_stats(freqs)
-        if isempty(pairs)
-            break
-        end
-
-        best_pair = argmax(pairs)
-        if pairs[best_pair] < 2
-            break
-        end
-
-        push!(tokenizer.reverse_vocab, best_pair)
-        tokenizer.vocab[best_pair] = current_id
-
-        _merge_pair!(freqs, best_pair, current_id)
+        tokenizer.vocab[[best_pair[1], best_pair[2]]] = current_id
+        push!(tokenizer.reverse_vocab, [best_pair[1], best_pair[2]])
+        merge_pair!(sequences, best_pair, current_id)
         current_id += 1
     end
-
     return tokenizer
 end
 
-function encode(tok::SimpleTokenizer, text::String)::Vector{Int}
-    tokens = [Int(c) for c in text]
+function encode(tokenizer::SimpleTokenizer, text::String)::Vector{Int}
+    raw_tokens = Int.(collect(codeunits(text)))
     result = Int[]
-
-    i = 1
-    while i <= length(tokens)
-        longest = [tokens[i]]
-        for j in (i+1):length(tokens)
-            prefix = tokens[i:j]
-            if haskey(tok.vocab, prefix)
-                longest = prefix
-            else
-                break
-            end
+    index = 1
+    while index <= length(raw_tokens)
+        longest = [raw_tokens[index]]
+        for final_index in (index + 1):length(raw_tokens)
+            candidate = raw_tokens[index:final_index]
+            haskey(tokenizer.vocab, candidate) || break
+            longest = candidate
         end
-        push!(result, tok.vocab[longest])
-        i += length(longest)
+        push!(result, tokenizer.vocab[longest])
+        index += length(longest)
     end
-
     return result
 end
 
-function decode(tok::SimpleTokenizer, tokens::Vector{Int})::String
-    bytes = Vector{Int}()
-
-    for token in tokens
-        if token == tok.eot_token
-            break
-        end
-        if token > 0 && token <= length(tok.reverse_vocab)
-            append!(bytes, tok.reverse_vocab[token])
-        end
-    end
-
-    bytes = bytes[bytes .!= 256]
-    return String([Char(b) for b in bytes])
-end
-
-# ============================================================================
-# GPT-2 Tokenizer
-# ============================================================================
-
-struct GPT2Tokenizer
-    vocab::Dict{String, Int}
-    reverse_vocab::Dict{Int, String}
-    merges::Vector{Tuple{String, String}}
-    byte_encoder::Dict{UInt8, String}
-    byte_decoder::Dict{String, UInt8}
-    eot_token::Int
-end
-
-function gpt2_byte_encoder()::Dict{UInt8, String}
-    encoder = Dict{UInt8, String}()
-    bs = UInt8[]
-    for b in 0x21:0x7e; push!(bs, b); end
-    for b in 0xa1:0xac; push!(bs, b); end
-    for b in 0xae:0xff; push!(bs, b); end
-    n = 0
-    for b in 0x00:0xff
-        if !(b in bs)
-            push!(bs, b)
-            encoder[b] = string(Char(256 + n))
-            n += 1
-        else
-            encoder[b] = string(Char(b))
+function expand_token!(bytes::Vector{UInt8}, tokenizer::SimpleTokenizer, token::Int)
+    token == tokenizer.eot_token && return bytes
+    0 <= token < length(tokenizer.reverse_vocab) || return bytes
+    expansion = tokenizer.reverse_vocab[token + 1]
+    if length(expansion) == 1 && 0 <= expansion[1] <= 255
+        push!(bytes, UInt8(expansion[1]))
+    else
+        for child in expansion
+            expand_token!(bytes, tokenizer, child)
         end
     end
-    return encoder
+    return bytes
 end
 
-function gpt2_byte_decoder(encoder::Dict{UInt8, String})::Dict{String, UInt8}
-    return Dict(v => k for (k, v) in encoder)
-end
-
-function GPT2Tokenizer(vocab_path::String, merges_path::String)
-    vocab = JSON.parsefile(vocab_path)
-    reverse_vocab = Dict{Int, String}(v => k for (k, v) in vocab)
-
-    merges = Tuple{String, String}[]
-    for line in eachline(merges_path)
-        startswith(line, "#") && continue
-        isempty(strip(line)) && continue
-        parts = split(strip(line))
-        if length(parts) == 2
-            push!(merges, (parts[1], parts[2]))
-        end
-    end
-
-    encoder = gpt2_byte_encoder()
-    decoder = gpt2_byte_decoder(encoder)
-    eot = get(vocab, "<|endoftext|>", 50256)
-
-    return GPT2Tokenizer(vocab, reverse_vocab, merges, encoder, decoder, eot)
-end
-
-function bpe(tok::GPT2Tokenizer, word::String)::Vector{String}
-    chars = [string(c) for c in word]
-    if length(chars) == 1
-        return chars
-    end
-
-    pairs = Dict{Tuple{String,String}, Int}()
-    for i in 1:length(chars)-1
-        pairs[(chars[i], chars[i+1])] = get(pairs, (chars[i], chars[i+1]), 0) + 1
-    end
-
-    while true
-        best_pair = nothing
-        best_rank = typemax(Int)
-        for (pair, _) in pairs
-            idx = findfirst(isequal(pair), tok.merges)
-            if idx !== nothing && idx < best_rank
-                best_rank = idx
-                best_pair = pair
-            end
-        end
-
-        best_pair === nothing && break
-
-        new_chars = String[]
-        i = 1
-        while i <= length(chars)
-            if i < length(chars) && (chars[i], chars[i+1]) == best_pair
-                push!(new_chars, chars[i] * chars[i+1])
-                i += 2
-            else
-                push!(new_chars, chars[i])
-                i += 1
-            end
-        end
-        chars = new_chars
-
-        if length(chars) == 1
-            break
-        end
-
-        pairs = Dict{Tuple{String,String}, Int}()
-        for i in 1:length(chars)-1
-            pairs[(chars[i], chars[i+1])] = get(pairs, (chars[i], chars[i+1]), 0) + 1
-        end
-    end
-
-    return chars
-end
-
-function encode(tok::GPT2Tokenizer, text::String)::Vector{Int}
-    text_bytes = Vector{UInt8}(text)
-    encoded = [tok.byte_encoder[b] for b in text_bytes]
-    pre_tokenized = split(join(encoded), " ")
-
-    token_ids = Int[]
-    for word in pre_tokenized
-        word = strip(word)
-        isempty(word) && continue
-        bpe_tokens = bpe(tok, word)
-        for t in bpe_tokens
-            id = get(tok.vocab, t, nothing)
-            if id !== nothing
-                push!(token_ids, id)
-            end
-        end
-    end
-
-    return token_ids
-end
-
-function encode_with_eot(tok::GPT2Tokenizer, text::String)::Vector{Int}
-    tokens = encode(tok, text)
-    push!(tokens, tok.eot_token)
-    return tokens
-end
-
-function decode(tok::GPT2Tokenizer, token_ids::Vector{Int})::String
-    tokens = String[]
-    for id in token_ids
-        id == tok.eot_token && break
-        t = get(tok.reverse_vocab, id, nothing)
-        t !== nothing && push!(tokens, t)
-    end
-    text = join(tokens)
+function decode(tokenizer::SimpleTokenizer, tokens::Vector{Int})::String
     bytes = UInt8[]
-    i = 1
-    while i <= length(text)
-        c = text[i]
-        b = get(tok.byte_decoder, string(c), nothing)
-        if b !== nothing
-            push!(bytes, b)
-        else
-            push!(bytes, UInt8(c))
-        end
-        i += 1
+    for token in tokens
+        token == tokenizer.eot_token && break
+        expand_token!(bytes, tokenizer, token)
     end
     return String(bytes)
 end
 
 # ============================================================================
-# Model Loading & Chat
+# GPT-2 tokenizer
 # ============================================================================
 
-const MODEL = Ref{Union{TransformerModel, Nothing}}(nothing)
-const TOKENIZER = Ref{Union{SimpleTokenizer, GPT2Tokenizer, Nothing}}(nothing)
+struct GPT2Tokenizer
+    vocab::Dict{String,Int}
+    reverse_vocab::Dict{Int,String}
+    merges::Vector{Tuple{String,String}}
+    byte_encoder::Dict{UInt8,String}
+    byte_decoder::Dict{String,UInt8}
+    eot_token::Int
+end
+
+function gpt2_byte_encoder()::Dict{UInt8,String}
+    encoder = Dict{UInt8,String}()
+    visible = UInt8[]
+    append!(visible, UInt8.(0x21:0x7e))
+    append!(visible, UInt8.(0xa1:0xac))
+    append!(visible, UInt8.(0xae:0xff))
+    next_codepoint = 0
+    for byte in UInt8(0):UInt8(255)
+        if byte in visible
+            encoder[byte] = string(Char(byte))
+        else
+            encoder[byte] = string(Char(256 + next_codepoint))
+            next_codepoint += 1
+        end
+    end
+    return encoder
+end
+
+gpt2_byte_decoder(encoder::Dict{UInt8,String}) = Dict(value => key for (key, value) in encoder)
+
+function GPT2Tokenizer(vocab_path::String, merges_path::String)
+    parsed_vocab = JSON.parsefile(vocab_path)
+    vocab = Dict{String,Int}(String(token) => Int(identifier) for (token, identifier) in parsed_vocab)
+    reverse_vocab = Dict{Int,String}(identifier => token for (token, identifier) in vocab)
+
+    merges = Tuple{String,String}[]
+    for line in eachline(merges_path)
+        startswith(line, "#") && continue
+        isempty(strip(line)) && continue
+        pieces = split(strip(line))
+        length(pieces) == 2 && push!(merges, (String(pieces[1]), String(pieces[2])))
+    end
+
+    encoder = gpt2_byte_encoder()
+    decoder = gpt2_byte_decoder(encoder)
+    eot = get(vocab, "<|endoftext|>", 50256)
+    return GPT2Tokenizer(vocab, reverse_vocab, merges, encoder, decoder, eot)
+end
+
+function bpe(tokenizer::GPT2Tokenizer, word::String)::Vector{String}
+    symbols = [string(character) for character in word]
+    length(symbols) <= 1 && return symbols
+    merge_ranks = Dict(pair => rank for (rank, pair) in enumerate(tokenizer.merges))
+
+    while length(symbols) > 1
+        best_index = 0
+        best_rank = typemax(Int)
+        for index in 1:(length(symbols) - 1)
+            rank = get(merge_ranks, (symbols[index], symbols[index + 1]), typemax(Int))
+            if rank < best_rank
+                best_rank = rank
+                best_index = index
+            end
+        end
+        best_index == 0 && break
+        merged = symbols[best_index] * symbols[best_index + 1]
+        symbols = vcat(symbols[1:(best_index - 1)], [merged], symbols[(best_index + 2):end])
+    end
+    return symbols
+end
+
+function encode(tokenizer::GPT2Tokenizer, text::String)::Vector{Int}
+    encoded_symbols = [tokenizer.byte_encoder[byte] for byte in codeunits(text)]
+    token_ids = Int[]
+    for token in bpe(tokenizer, join(encoded_symbols))
+        identifier = get(tokenizer.vocab, token, nothing)
+        identifier === nothing || push!(token_ids, identifier)
+    end
+    return token_ids
+end
+
+function encode_with_eot(tokenizer::GPT2Tokenizer, text::String)::Vector{Int}
+    tokens = encode(tokenizer, text)
+    push!(tokens, tokenizer.eot_token)
+    return tokens
+end
+
+function decode(tokenizer::GPT2Tokenizer, token_ids::Vector{Int})::String
+    encoded = join(
+        get(tokenizer.reverse_vocab, identifier, "")
+        for identifier in token_ids if identifier != tokenizer.eot_token
+    )
+    bytes = UInt8[]
+    for character in encoded
+        byte = get(tokenizer.byte_decoder, string(character), nothing)
+        byte === nothing || push!(bytes, byte)
+    end
+    return String(bytes)
+end
+
+# ============================================================================
+# Model loading and chat
+# ============================================================================
+
+const MODEL = Ref{Union{TransformerModel,Nothing}}(nothing)
+const TOKENIZER = Ref{Union{SimpleTokenizer,GPT2Tokenizer,Nothing}}(nothing)
+const WEIGHTS_PATH = Ref{Union{String,Nothing}}(nothing)
 
 function load_model(config::TransformerConfig=TransformerConfig())
     model = TransformerModel(config)
@@ -656,115 +703,100 @@ function load_tokenizer(vocab_size::Int=5000)
     return tokenizer
 end
 
-function is_loaded()::Bool
-    return MODEL[] !== nothing && TOKENIZER[] !== nothing
-end
+is_loaded()::Bool = MODEL[] !== nothing && TOKENIZER[] !== nothing
 
-# ============================================================================
-# Pretrained weight loading (GPT-2 binary format)
-# ============================================================================
-
-const WEIGHTS_PATH = Ref{Union{String, Nothing}}(nothing)
-
-"""
-    load_pretrained(weights_path::String)
-
-Load GPT-2 pretrained weights from a binary file exported by
-scripts/export_gpt2_weights.py. The file format is:
-1. A JSON header string (null-terminated)
-2. Raw float32 data for each tensor in order
-"""
-function load_pretrained(weights_path::String;
-                         vocab_path::Union{String,Nothing}=nothing,
-                         merges_path::Union{String,Nothing}=nothing)
+"""Load GPT-2 weights exported by `scripts/export_gpt2_weights.py`."""
+function load_pretrained(
+    weights_path::String;
+    vocab_path::Union{String,Nothing}=nothing,
+    merges_path::Union{String,Nothing}=nothing,
+)
     @info "Loading pretrained GPT-2 weights from: $weights_path"
-
     if vocab_path !== nothing && merges_path !== nothing
-        tok = GPT2Tokenizer(vocab_path, merges_path)
-        TOKENIZER[] = tok
-        @info "GPT-2 tokenizer loaded (vocab: $(length(tok.vocab)) tokens)"
+        tokenizer = GPT2Tokenizer(vocab_path, merges_path)
+        TOKENIZER[] = tokenizer
+        @info "GPT-2 tokenizer loaded" vocab=length(tokenizer.vocab)
     end
 
     data = read(weights_path)
+    null_position = findfirst(isequal(0x00), data)
+    null_position === nothing && error("Invalid weight file: no null terminator found")
+    tensor_info = JSON.parse(String(data[1:(null_position - 1)]))
+    raw_floats = reinterpret(Float32, data[(null_position + 1):end])
+    position = Ref(1)
 
-    null_pos = findfirst(isequal(0x00), data)
-    if null_pos === nothing
-        error("Invalid weight file: no null terminator found")
-    end
-
-    header_bytes = data[1:null_pos[1]-1]
-    header_str = String(header_bytes)
-    tensor_info = JSON.parse(header_str)
-
-    offset = null_pos[1] + 1
-    raw_floats = reinterpret(Float32, data[offset:end])
-    pos = Ref(1)
-
-    function read_tensor(name::String)
+    function read_tensor(name::String)::Array{Float32}
         info = tensor_info[name]
-        shape = info["shape"]
-        shape_t = Tuple(reverse(shape))
-        count = prod(Int, shape)
-        w = reshape(raw_floats[pos[]:pos[]+count-1], shape_t)
-        pos[] += count
-        return w
+        shape = Int.(info["shape"])
+        count = prod(shape)
+        final_position = position[] + count - 1
+        final_position <= length(raw_floats) || error("Weight file ended while reading $name")
+        tensor = reshape(copy(raw_floats[position[]:final_position]), Tuple(reverse(shape)))
+        position[] = final_position + 1
+        return Array(tensor)
     end
 
     cfg = TransformerConfig()
     n = cfg.n_embed
-    wte = read_tensor("wte.weight")
-    wpe = read_tensor("wpe.weight")
+    token_embedding = Matrix{Float32}(read_tensor("wte.weight"))
+    position_embedding = Matrix{Float32}(read_tensor("wpe.weight"))
 
     blocks = TransformerBlock[]
-    for i in 0:11
-        ln1_w = vec(read_tensor("h.$i.ln_1.weight"))
-        ln1_b = vec(read_tensor("h.$i.ln_1.bias"))
-        ln2_w = vec(read_tensor("h.$i.ln_2.weight"))
-        ln2_b = vec(read_tensor("h.$i.ln_2.bias"))
+    for layer_index in 0:(cfg.n_layers - 1)
+        ln1_weight = vec(read_tensor("h.$layer_index.ln_1.weight"))
+        ln1_bias = vec(read_tensor("h.$layer_index.ln_1.bias"))
+        ln2_weight = vec(read_tensor("h.$layer_index.ln_2.weight"))
+        ln2_bias = vec(read_tensor("h.$layer_index.ln_2.bias"))
 
-        ca_w = read_tensor("h.$i.attn.c_attn.weight")
-        ca_b = vec(read_tensor("h.$i.attn.c_attn.bias"))
-        cp_w = read_tensor("h.$i.attn.c_proj.weight")
-        cp_b = vec(read_tensor("h.$i.attn.c_proj.bias"))
+        combined_attention_weight = read_tensor("h.$layer_index.attn.c_attn.weight")
+        combined_attention_bias = vec(read_tensor("h.$layer_index.attn.c_attn.bias"))
+        output_weight = read_tensor("h.$layer_index.attn.c_proj.weight")
+        output_bias = vec(read_tensor("h.$layer_index.attn.c_proj.bias"))
 
-        Wq = ca_w[1:n, :]'
-        Wk = ca_w[n+1:2*n, :]'
-        Wv = ca_w[2*n+1:3*n, :]'
-        bq = ca_b[1:n]
-        bk = ca_b[n+1:2*n]
-        bv = ca_b[2*n+1:3*n]
-        Wo = cp_w'
-        bo = cp_b
+        Wq = Matrix{Float32}(transpose(combined_attention_weight[1:n, :]))
+        Wk = Matrix{Float32}(transpose(combined_attention_weight[(n + 1):(2n), :]))
+        Wv = Matrix{Float32}(transpose(combined_attention_weight[(2n + 1):(3n), :]))
+        bq = Vector{Float32}(combined_attention_bias[1:n])
+        bk = Vector{Float32}(combined_attention_bias[(n + 1):(2n)])
+        bv = Vector{Float32}(combined_attention_bias[(2n + 1):(3n)])
+        Wo = Matrix{Float32}(transpose(output_weight))
+        bo = Vector{Float32}(output_bias)
 
-        fc_w = read_tensor("h.$i.mlp.c_fc.weight")
-        fc_b = vec(read_tensor("h.$i.mlp.c_fc.bias"))
-        mp_w = read_tensor("h.$i.mlp.c_proj.weight")
-        mp_b = vec(read_tensor("h.$i.mlp.c_proj.bias"))
+        W1 = Matrix{Float32}(read_tensor("h.$layer_index.mlp.c_fc.weight"))
+        b1 = Vector{Float32}(vec(read_tensor("h.$layer_index.mlp.c_fc.bias")))
+        W2 = Matrix{Float32}(read_tensor("h.$layer_index.mlp.c_proj.weight"))
+        b2 = Vector{Float32}(vec(read_tensor("h.$layer_index.mlp.c_proj.bias")))
 
-        W1 = fc_w
-        b1 = fc_b
-        W2 = mp_w
-        b2 = mp_b
-
-        hd = n ÷ cfg.n_heads
-        attn = CausalAttention(Wq, Wk, Wv, Wo, bq, bk, bv, bo, cfg.n_heads, hd, Float32(1.0 / sqrt(hd)))
-        ff = FeedForward(W1, b1, W2, b2, gelu)
-        push!(blocks, TransformerBlock(attn, ff, LayerNorm(ln1_w, ln1_b, 1f-5, n), LayerNorm(ln2_w, ln2_b, 1f-5, n)))
+        head_dim = n ÷ cfg.n_heads
+        attention = CausalAttention(
+            Wq, Wk, Wv, Wo, bq, bk, bv, bo,
+            cfg.n_heads, head_dim, inv(sqrt(Float32(head_dim))),
+        )
+        feed_forward = FeedForward(W1, b1, W2, b2, gelu)
+        push!(
+            blocks,
+            TransformerBlock(
+                attention,
+                feed_forward,
+                LayerNorm(Vector{Float32}(ln1_weight), Vector{Float32}(ln1_bias), 1f-5, n),
+                LayerNorm(Vector{Float32}(ln2_weight), Vector{Float32}(ln2_bias), 1f-5, n),
+            ),
+        )
     end
 
-    ln_f_w = vec(read_tensor("ln_f.weight"))
-    ln_f_b = vec(read_tensor("ln_f.bias"))
-    final_ln = LayerNorm(ln_f_w, ln_f_b, 1f-5, n)
-
-    model = TransformerModel(cfg, wte, wpe, blocks, final_ln, wte)
+    final_weight = Vector{Float32}(vec(read_tensor("ln_f.weight")))
+    final_bias = Vector{Float32}(vec(read_tensor("ln_f.bias")))
+    final_norm = LayerNorm(final_weight, final_bias, 1f-5, n)
+    model = TransformerModel(cfg, token_embedding, position_embedding, blocks, final_norm, token_embedding)
     WEIGHTS_PATH[] = weights_path
-
     return model
 end
 
-function load_local_model(weights_path::String;
-                          vocab_path::Union{String,Nothing}=nothing,
-                          merges_path::Union{String,Nothing}=nothing)
+function load_local_model(
+    weights_path::String;
+    vocab_path::Union{String,Nothing}=nothing,
+    merges_path::Union{String,Nothing}=nothing,
+)
     model = load_pretrained(weights_path; vocab_path=vocab_path, merges_path=merges_path)
     MODEL[] = model
     return model
@@ -775,20 +807,19 @@ function chat_local(input::String; session_id::Int64=0)::Dict{String,Any}
         return Dict("error" => "Model not loaded. Call load_local_model() first.", "text" => "")
     end
 
-    model = MODEL[]
-    tokenizer = TOKENIZER[]
-
-    response = generate(model, tokenizer, input; rng=Random.Xoshiro(time_ns() % Int64))
-
+    response = generate(
+        MODEL[],
+        TOKENIZER[],
+        input;
+        rng=Random.Xoshiro(UInt64(time_ns())),
+    )
     return Dict(
         "text" => response,
         "session_id" => session_id,
-        "model" => "NanoGPT (Pure Julia)"
+        "model" => "NanoGPT (Pure Julia)",
     )
 end
 
-function chat(input::String; session_id::Int64=0)::Dict{String,Any}
-    return chat_local(input; session_id=session_id)
-end
+chat(input::String; session_id::Int64=0) = chat_local(input; session_id=session_id)
 
 end # module
