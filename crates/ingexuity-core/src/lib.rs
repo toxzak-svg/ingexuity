@@ -244,7 +244,10 @@ fn classify_topics(message: &str) -> BTreeSet<String> {
         .collect();
 
     let mut topics = BTreeSet::new();
-    if words.iter().any(|word| ["work", "job", "career"].contains(&word.as_str())) {
+    if words
+        .iter()
+        .any(|word| ["work", "job", "career"].contains(&word.as_str()))
+    {
         topics.insert("work".to_owned());
     }
     if words

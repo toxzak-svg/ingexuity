@@ -17,10 +17,9 @@ struct Case {
 
 #[test]
 fn synthetic_baseline_is_deterministic() {
-    let fixture: Fixture = serde_json::from_str(include_str!(
-        "../../../fixtures/synthetic/baseline.json"
-    ))
-    .expect("baseline fixture must remain valid JSON");
+    let fixture: Fixture =
+        serde_json::from_str(include_str!("../../../fixtures/synthetic/baseline.json"))
+            .expect("baseline fixture must remain valid JSON");
 
     assert_eq!(fixture.schema_version, 1);
     let backend = HeuristicBackend;
