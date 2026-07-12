@@ -6,7 +6,7 @@ on:
   pull_request:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: rust-ci-${{ github.ref }}
@@ -17,8 +17,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - name: Check out repository
+      - name: Check out pull request head
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -28,8 +30,23 @@ jobs:
       - name: Create diagnostics directory
         run: mkdir -p ci-artifacts
 
-      - name: Format diagnostic copy
-        run: cargo fmt --all
+      - name: Format and resolve lockfile
+        run: |
+          cargo fmt --all
+          cargo generate-lockfile
+
+      - name: Commit generated Rust files once
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock crates/**/*.rs
+          if git diff --cached --quiet; then
+            echo "Generated Rust files already committed."
+          else
+            git commit -m "build: commit Cargo lockfile and rustfmt output"
+            git push origin HEAD:${{ github.event.pull_request.head.ref }}
+          fi
 
       - name: Lint
         id: lint
@@ -37,7 +54,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          cargo clippy --workspace --all-targets --all-features -- -D warnings 2>&1 | tee ci-artifacts/clippy.log
+          cargo clippy --locked --workspace --all-targets --all-features -- -D warnings 2>&1 | tee ci-artifacts/clippy.log
 
       - name: Test
         id: test
@@ -45,7 +62,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          cargo test --workspace --all-features 2>&1 | tee ci-artifacts/test.log
+          cargo test --locked --workspace --all-features 2>&1 | tee ci-artifacts/test.log
 
       - name: Build release binary
         id: build
@@ -53,11 +70,11 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          cargo build --workspace --release 2>&1 | tee ci-artifacts/build.log
+          cargo build --locked --workspace --release 2>&1 | tee ci-artifacts/build.log
 
       - name: Start model-free server
         id: smoke
-        if: steps.build.outcome == 'success'
+        if: ${{ always() && steps.build.outcome == 'success' }}
         continue-on-error: true
         run: |
           target/release/ingexuity-server > ci-artifacts/server.log 2>&1 &
@@ -73,7 +90,7 @@ jobs:
 
       - name: Verify health contract
         id: health
-        if: steps.smoke.outcome == 'success'
+        if: ${{ always() && steps.smoke.outcome == 'success' }}
         continue-on-error: true
         run: |
           python3 - <<'PY'
@@ -133,7 +150,7 @@ jobs:
 
       - name: Smoke test container
         id: docker_smoke
-        if: steps.docker_build.outcome == 'success'
+        if: ${{ always() && steps.docker_build.outcome == 'success' }}
         continue-on-error: true
         run: |
           docker run --detach --rm --name ingexuity-ci -p 8000:8000 ingexuity:ci
