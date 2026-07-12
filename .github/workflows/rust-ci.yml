@@ -1,3 +1,4 @@
+# Restored after the durable-runtime integration stress pass.
 name: Rust CI
 
 on:
