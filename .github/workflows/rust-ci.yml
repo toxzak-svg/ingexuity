@@ -1,15 +1,21 @@
-name: Diagnose SQLite store
+name: Rust CI
 
 on:
+  push:
+    branches: [main]
   pull_request:
 
 permissions:
   contents: read
 
+concurrency:
+  group: rust-ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  store-test:
+  test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -18,22 +24,79 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.97.0
+          components: rustfmt, clippy
 
-      - name: Run store tests
-        id: test
-        continue-on-error: true
-        shell: bash
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --locked --workspace --all-features
+
+      - name: Build release binary
+        run: cargo build --locked --workspace --release
+
+      - name: Start model-free server
         run: |
-          set -o pipefail
-          cargo test --locked -p ingexuity-store -- --nocapture 2>&1 | tee store-test.log
+          target/release/ingexuity-server > /tmp/ingexuity.log 2>&1 &
+          echo $! > /tmp/ingexuity.pid
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8000/health/live > /tmp/live.json \
+              && curl --fail --silent http://127.0.0.1:8000/health/ready > /tmp/ready.json; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/ingexuity.log
+          exit 1
 
-      - name: Upload store test log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: sqlite-store-test-log
-          path: store-test.log
+      - name: Verify health contracts
+        run: |
+          python3 - <<'PY'
+          import json
+          with open('/tmp/live.json', encoding='utf-8') as handle:
+              live = json.load(handle)
+          with open('/tmp/ready.json', encoding='utf-8') as handle:
+              ready = json.load(handle)
+          assert live['status'] == 'ok', live
+          assert live['runtime'] == 'rust', live
+          assert ready['status'] == 'ready', ready
+          assert ready['runtime'] == 'rust', ready
+          assert ready['backend'] == 'ready', ready
+          assert ready['available_inference_slots'] >= 1, ready
+          PY
 
-      - name: Enforce test result
+      - name: Stop server
         if: always()
-        run: test "${{ steps.test.outcome }}" = success
+        run: |
+          if [ -f /tmp/ingexuity.pid ]; then
+            kill "$(cat /tmp/ingexuity.pid)" || true
+          fi
+          cat /tmp/ingexuity.log || true
+
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build model-free image
+        run: docker build --tag ingexuity:ci .
+
+      - name: Smoke test container
+        run: |
+          docker run --detach --rm --name ingexuity-ci -p 8000:8000 ingexuity:ci
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8000/health/live > /tmp/container-live.json \
+              && curl --fail --silent http://127.0.0.1:8000/health/ready > /tmp/container-ready.json; then
+              docker stop ingexuity-ci
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs ingexuity-ci
+          docker stop ingexuity-ci || true
+          exit 1
