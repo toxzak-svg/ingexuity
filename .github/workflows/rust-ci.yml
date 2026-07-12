@@ -26,36 +26,60 @@ jobs:
           toolchain: 1.97.0
           components: rustfmt, clippy
 
+      - name: Create diagnostics directory
+        run: mkdir -p ci-artifacts
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
       - name: Lint
-        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+        id: lint
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --locked --workspace --all-targets --all-features -- -D warnings 2>&1 | tee ci-artifacts/clippy.log
 
       - name: Test
-        run: cargo test --locked --workspace --all-features
+        id: test
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked --workspace --all-features 2>&1 | tee ci-artifacts/test.log
 
       - name: Build release binary
-        run: cargo build --locked --workspace --release
+        id: build
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo build --locked --workspace --release 2>&1 | tee ci-artifacts/build.log
 
       - name: Start model-free server
+        id: smoke
+        if: ${{ always() && steps.build.outcome == 'success' }}
+        continue-on-error: true
         run: |
-          target/release/ingexuity-server > /tmp/ingexuity.log 2>&1 &
+          target/release/ingexuity-server > ci-artifacts/server.log 2>&1 &
           echo $! > /tmp/ingexuity.pid
           for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:8000/health > /tmp/health.json; then
+            if curl --fail --silent http://127.0.0.1:8000/health > ci-artifacts/health.json; then
               exit 0
             fi
             sleep 1
           done
-          cat /tmp/ingexuity.log
+          cat ci-artifacts/server.log
           exit 1
 
       - name: Verify health contract
+        id: health
+        if: ${{ always() && steps.smoke.outcome == 'success' }}
+        continue-on-error: true
         run: |
           python3 - <<'PY'
           import json
-          with open('/tmp/health.json', encoding='utf-8') as handle:
+          with open('ci-artifacts/health.json', encoding='utf-8') as handle:
               health = json.load(handle)
           assert health['status'] == 'ok', health
           assert health['runtime'] == 'rust', health
@@ -68,7 +92,24 @@ jobs:
           if [ -f /tmp/ingexuity.pid ]; then
             kill "$(cat /tmp/ingexuity.pid)" || true
           fi
-          cat /tmp/ingexuity.log || true
+          cat ci-artifacts/server.log || true
+
+      - name: Upload Rust diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-diagnostics
+          if-no-files-found: warn
+          path: ci-artifacts/**
+
+      - name: Enforce Rust outcomes
+        if: always()
+        run: |
+          test "${{ steps.lint.outcome }}" = success
+          test "${{ steps.test.outcome }}" = success
+          test "${{ steps.build.outcome }}" = success
+          test "${{ steps.smoke.outcome }}" = success
+          test "${{ steps.health.outcome }}" = success
 
   container:
     runs-on: ubuntu-latest
