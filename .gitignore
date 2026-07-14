@@ -25,3 +25,4 @@ models/gpt2_124m.*
 *.bin
 models/*.safetensors
 temp_*_model/*.safetensors
+.worktrees/
