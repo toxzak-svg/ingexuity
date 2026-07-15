@@ -54,4 +54,5 @@ def test_all_code_cells_compile():
 def test_notebook_installs_pascal_compatible_torch():
     source = notebook_source()
     assert '"torch==2.5.1"' in source
+    assert '"torchvision==0.20.1"' in source
     assert '"https://download.pytorch.org/whl/cu121"' in source
