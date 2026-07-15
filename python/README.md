@@ -9,6 +9,8 @@ This directory contains Python scripts for model training and inference.
 | [`gemma_e2b_service.py`](gemma_e2b_service.py) | HTTP service for Gemma 4 E2B with function calling |
 | [`train_llama.py`](train_llama.py) | LoRA fine-tuning for Llama 3.2 1B |
 | [`train_llama_simple.py`](train_llama_simple.py) | Simplified LoRA fine-tuning for Llama 3.2 1B |
+| [`build_synthetic_dataset.py`](build_synthetic_dataset.py) | Build validated prediction-training smoke data |
+| [`train_weights.ipynb`](../models/trained_model/notebooks/train_weights.ipynb) | End-to-end Colab/Kaggle QLoRA notebook |
 | [`kaggle_train.py`](kaggle_train.py) | Kaggle-specific training runner (P100 GPU) |
 | [`paperspace_train.py`](paperspace_train.py) | Paperspace-specific training runner (M4000/RTX4000) |
 | [`lora_config.yaml`](lora_config.yaml) | LoRA hyperparameters configuration |
@@ -20,6 +22,19 @@ pip install -r requirements.txt
 ```
 
 ## Quick Start
+
+### Recommended: validated synthetic Kaggle smoke
+
+Open [`train_weights.ipynb`](../models/trained_model/notebooks/train_weights.ipynb) in Kaggle, enable an NVIDIA GPU and Internet, add `HF_TOKEN` as a secret, and run all cells. The default synthetic mode builds 100 records and trains for one epoch.
+
+For local dataset validation:
+
+```bash
+python -m pytest python/test_ingexuity_data.py python/test_training_notebook.py -v
+python python/build_synthetic_dataset.py --output data/synthetic-pilot --count 100 --seed 42
+```
+
+See [`docs/training/SYNTHETIC_DATA.md`](../docs/training/SYNTHETIC_DATA.md) for the schema, outputs, and claim boundary. The 100-row run is a pipeline artifact, not the approved 10,000-example pilot and not evidence of improved user prediction.
 
 ### 1. Fine-tune Llama 3.2 on Kaggle
 
