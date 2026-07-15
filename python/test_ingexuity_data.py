@@ -9,6 +9,8 @@ from ingexuity_data.scenarios import generate_scenarios
 from ingexuity_data.render import TemplateRenderer
 from ingexuity_data.build import build_dataset
 from ingexuity_data.curriculum import CATEGORY_COUNTS, build_curriculum
+from ingexuity_data.teacher import parse_teacher_rewrite
+from ingexuity_data.teacher_build import build_teacher_dataset, scale_gate
 from collections import Counter
 
 
@@ -162,3 +164,95 @@ def test_curriculum_benchmark_is_deterministic_subset():
     second = build_curriculum(count=200, seed=42)
     assert first == second
     assert len(first) == 200
+
+
+def test_teacher_rewrite_parser_accepts_only_surface_fields():
+    rewrite = parse_teacher_rewrite(
+        '{"user_message":"I keep circling this decision.",'
+        '"assistant_response":"What feels most uncertain about it?"}'
+    )
+    assert rewrite == {
+        "user_message": "I keep circling this decision.",
+        "assistant_response": "What feels most uncertain about it?",
+    }
+
+
+def test_teacher_rewrite_parser_rejects_label_edits_and_internal_leaks():
+    extra_label = (
+        '{"user_message":"I am stuck.","assistant_response":"What is blocking you?",'
+        '"response_mode":"action"}'
+    )
+    leaked_internal = (
+        '{"user_message":"I am stuck.",'
+        '"assistant_response":"My prediction confidence is 0.76."}'
+    )
+    for payload in (extra_label, leaked_internal):
+        try:
+            parse_teacher_rewrite(payload)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("unsafe teacher rewrite was accepted")
+
+
+def test_surface_rewrite_preserves_controlled_labels():
+    scenario = build_curriculum(count=1, seed=11)[0]
+    renderer = TemplateRenderer(seed=11)
+    base = renderer.render(scenario)
+    rewritten = renderer.render_with_surface(
+        scenario,
+        {
+            "user_message": "I have opened the task three times and still cannot begin.",
+            "assistant_response": "What is the smallest part that feels possible to touch?",
+        },
+    )
+    assert rewritten["predictions"] == base["predictions"]
+    assert rewritten["response_mode"] == base["response_mode"]
+    assert rewritten["observed_outcome"] == base["observed_outcome"]
+    assert rewritten["conversation"][-1]["content"].startswith("I have opened")
+    envelope = json.loads(rewritten["messages"][-1]["content"])
+    assert envelope["assistant_response"] == rewritten["assistant_response"]
+    assert validate_record(rewritten) == []
+
+
+def test_scale_gate_enforces_acceptance_duplicates_and_runtime():
+    passing = scale_gate(requested=200, accepted=194, duplicates=2, elapsed_seconds=300)
+    assert passing["passed"] is True
+    assert passing["estimated_10k_hours"] < 8
+    assert scale_gate(200, 189, 0, 300)["passed"] is False
+    assert scale_gate(200, 195, 5, 300)["passed"] is False
+    assert scale_gate(200, 195, 0, 600)["passed"] is False
+
+
+class FakeTeacher:
+    def rewrite_batch(self, prompts):
+        return [
+            {
+                "user_message": f"Natural user message {index}",
+                "assistant_response": f"Natural assistant response {index}",
+            }
+            for index, _ in enumerate(prompts)
+        ]
+
+
+def test_teacher_build_is_resumable_and_writes_final_splits(tmp_path):
+    first = build_teacher_dataset(
+        output_dir=tmp_path,
+        count=20,
+        seed=17,
+        teacher=FakeTeacher(),
+        stop_after=7,
+    )
+    assert first["complete"] is False
+    second = build_teacher_dataset(
+        output_dir=tmp_path,
+        count=20,
+        seed=17,
+        teacher=FakeTeacher(),
+    )
+    assert second["complete"] is True
+    assert second["accepted"] == 20
+    assert second["rejected"] == 0
+    assert sum(second["split_counts"].values()) == 20
+    accepted_rows = (tmp_path / "teacher-accepted.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(accepted_rows) == 20

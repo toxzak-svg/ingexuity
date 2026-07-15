@@ -250,6 +250,20 @@ class TemplateRenderer:
         ]
         return record
 
+    def render_with_surface(self, scenario: dict, surface: dict[str, str]) -> dict:
+        """Apply teacher wording without giving the teacher control of any label."""
+        record = self.render(scenario)
+        user_message = surface["user_message"].strip()
+        assistant_response = surface["assistant_response"].strip()
+        record["conversation"][-1]["content"] = user_message
+        record["inferred_user_state"]["evidence"] = [user_message]
+        record["assistant_response"] = assistant_response
+        record["messages"][1]["content"] = user_message
+        record["messages"][2]["content"] = json.dumps(
+            _make_envelope(record), ensure_ascii=False, separators=(",", ":")
+        )
+        return record
+
 
 class TeacherRenderer:
     """Provider-neutral teacher boundary; generated records face the same validator."""
