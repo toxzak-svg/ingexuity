@@ -289,7 +289,15 @@ def main() -> Path:
         task_type="CAUSAL_LM",
     )
 
+    effective_batch = args.batch * args.grad_accum * max(1, torch.cuda.device_count())
+    approximate_steps = math.ceil(len(train_dataset) / effective_batch * args.epochs)
     has_validation = validation_dataset is not None
+    checkpoint_strategy = (
+        "steps"
+        if approximate_steps >= max(args.eval_steps, args.save_steps)
+        else "epoch"
+    )
+
     training_args = SFTConfig(
         output_dir=str(output_dir),
         per_device_train_batch_size=args.batch,
@@ -312,10 +320,14 @@ def main() -> Path:
         gradient_checkpointing_kwargs={"use_reentrant": False},
         logging_steps=args.logging_steps,
         logging_first_step=True,
-        eval_strategy="steps" if has_validation else "no",
-        eval_steps=args.eval_steps if has_validation else None,
-        save_strategy="steps",
-        save_steps=args.save_steps,
+        eval_strategy=checkpoint_strategy if has_validation else "no",
+        eval_steps=(
+            args.eval_steps
+            if has_validation and checkpoint_strategy == "steps"
+            else None
+        ),
+        save_strategy=checkpoint_strategy,
+        save_steps=args.save_steps if checkpoint_strategy == "steps" else None,
         save_total_limit=args.save_total_limit,
         load_best_model_at_end=has_validation,
         metric_for_best_model="eval_loss" if has_validation else None,
@@ -336,10 +348,9 @@ def main() -> Path:
         },
     )
 
-    effective_batch = args.batch * args.grad_accum * max(1, torch.cuda.device_count())
-    approximate_steps = math.ceil(len(train_dataset) / effective_batch * args.epochs)
     print(f"[Train] Effective batch size: {effective_batch}")
     print(f"[Train] Approximate optimizer steps: {approximate_steps}")
+    print(f"[Train] Checkpoint strategy: {checkpoint_strategy}")
     print(f"[Train] Precision: {compute_dtype}; QLoRA 4-bit: {use_4bit}")
 
     trainer = SFTTrainer(
