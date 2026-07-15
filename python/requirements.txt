@@ -2,37 +2,29 @@
 # Install with: pip install -r python/requirements.txt
 
 # ---------------------------------------------------------------------------
-# Core inference
+# Core inference and model loading
 # ---------------------------------------------------------------------------
-transformers>=4.50.0
-torch>=2.0.0
-accelerate>=0.20.0
+torch>=2.6.0
+transformers>=5.0.0,<6.0.0
+accelerate>=1.10.0,<2.0.0
+huggingface-hub>=0.30.0
 numpy>=1.24.0
+sentencepiece>=0.2.0
+protobuf>=5.0.0
 
 # ---------------------------------------------------------------------------
-# LoRA fine-tuning
+# Conversation SFT / LoRA / QLoRA
 # ---------------------------------------------------------------------------
-peft>=0.13.0          # LoRA, QLoRA support
-bitsandbytes>=0.44.0  # 4-bit quantization for memory efficiency
+trl>=1.8.0,<2.0.0
+peft>=0.18.0,<1.0.0
+datasets>=4.0.0,<5.0.0
+bitsandbytes>=0.48.0,<1.0.0
 
 # ---------------------------------------------------------------------------
-# Training utilities
+# Optional inference bindings and vision support
 # ---------------------------------------------------------------------------
-datasets>=2.20.0      # Dataset loading and preprocessing
-torchvision>=0.15.0    # Optional, for vision components
+llama-cpp-python>=0.3.0
+torchvision>=0.21.0
 
-# ---------------------------------------------------------------------------
-# GGUF conversion (for llama.cpp integration)
-# ---------------------------------------------------------------------------
-llama-cpp-python>=0.2.0  # GGUF export and llama.cpp bindings
-
-# ---------------------------------------------------------------------------
 # Optional: For speech generation
-# ---------------------------------------------------------------------------
 # TTS>=0.15.0
-
-# ---------------------------------------------------------------------------
-# Cloud GPU platforms specific
-# ---------------------------------------------------------------------------
-# Kaggle: pip install kaggle
-# Paperspace: No extra deps needed (standard torch works)
