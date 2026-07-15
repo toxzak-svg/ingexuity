@@ -235,6 +235,28 @@ class FakeTeacher:
         ]
 
 
+class DuplicateThenUniqueTeacher:
+    def rewrite_batch(self, prompts):
+        rows = []
+        for prompt in prompts:
+            if "duplicate_or_invalid_rewrite" in prompt:
+                marker = json.loads(prompt)["variation_id"][-12:]
+                rows.append(
+                    {
+                        "user_message": f"Distinct retry message {marker}",
+                        "assistant_response": f"Distinct retry response {marker}",
+                    }
+                )
+            else:
+                rows.append(
+                    {
+                        "user_message": "Repeated generic message",
+                        "assistant_response": "Repeated generic response",
+                    }
+                )
+        return rows
+
+
 def test_teacher_build_is_resumable_and_writes_final_splits(tmp_path):
     first = build_teacher_dataset(
         output_dir=tmp_path,
@@ -256,3 +278,16 @@ def test_teacher_build_is_resumable_and_writes_final_splits(tmp_path):
     assert sum(second["split_counts"].values()) == 20
     accepted_rows = (tmp_path / "teacher-accepted.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(accepted_rows) == 20
+
+
+def test_teacher_build_retries_duplicates_without_weakening_gate(tmp_path):
+    result = build_teacher_dataset(
+        output_dir=tmp_path,
+        count=30,
+        seed=19,
+        teacher=DuplicateThenUniqueTeacher(),
+    )
+    assert result["accepted"] == 30
+    assert result["rejected"] == 0
+    assert result["last_batch"]["duplicate_retries"] > 0
+    assert result["last_batch"]["duplicates"] == 0

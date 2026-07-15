@@ -68,6 +68,32 @@ def make_teacher_prompt(scenario: dict, draft: dict) -> str:
     return json.dumps(surface_context, ensure_ascii=False, separators=(",", ":"))
 
 
+def make_retry_prompt(
+    scenario: dict,
+    draft: dict,
+    previous_surface: dict | None,
+    reason: str,
+    retry_number: int,
+) -> str:
+    """Request a distinct surface while preserving the same controlled scenario."""
+    return json.dumps(
+        {
+            "task": "duplicate_or_invalid_rewrite",
+            "variation_id": scenario["surface_seed"],
+            "retry_number": retry_number,
+            "rejection_reason": reason,
+            "previous_surface": previous_surface,
+            "scenario": json.loads(make_teacher_prompt(scenario, draft)),
+            "instruction": (
+                "Write a materially different, natural paraphrase. Change the opening, sentence "
+                "shape, and concrete wording while preserving meaning and the requested response mode."
+            ),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
 class LocalTeacher:
     """Batched Hugging Face teacher; heavy imports remain Kaggle-only."""
 

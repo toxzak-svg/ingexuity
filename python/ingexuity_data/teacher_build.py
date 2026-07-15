@@ -11,7 +11,7 @@ from pathlib import Path
 from .build import _split_families, _write_jsonl, sha256_file
 from .curriculum import build_curriculum
 from .render import TemplateRenderer
-from .teacher import make_teacher_prompt
+from .teacher import make_retry_prompt, make_teacher_prompt
 from .validate import semantic_signature, validate_generated_record
 
 
@@ -127,33 +127,64 @@ def build_teacher_dataset(
         raise ValueError("teacher returned a different number of rewrites than prompts")
 
     duplicates = 0
-    for scenario, rewrite in zip(pending, rewrites):
-        if isinstance(rewrite, Exception):
-            entry = {"scenario_id": scenario["scenario_id"], "errors": [str(rewrite)]}
-            rejected.append(entry)
-            _append_jsonl(rejected_path, entry)
-            continue
-        record = renderer.render_with_surface(scenario, rewrite)
-        record["curriculum"] = {
-            key: scenario[key]
-            for key in (
-                "category", "domain", "communication_style", "time_horizon",
-                "evidence_level", "familiarity", "surface_seed",
+    duplicate_retries = 0
+    for scenario, draft, initial_rewrite in zip(pending, drafts, rewrites):
+        rewrite = initial_rewrite
+        final_errors: list[str] = []
+        accepted_record = None
+        for attempt in range(3):
+            record = None
+            signature = None
+            if isinstance(rewrite, Exception):
+                errors = [str(rewrite)]
+                previous_surface = None
+            else:
+                previous_surface = rewrite
+                record = renderer.render_with_surface(scenario, rewrite)
+                record["curriculum"] = {
+                    key: scenario[key]
+                    for key in (
+                        "category", "domain", "communication_style", "time_horizon",
+                        "evidence_level", "familiarity", "surface_seed",
+                    )
+                }
+                record["teacher_attempts"] = attempt + 1
+                errors = validate_generated_record(record)
+                signature = semantic_signature(record)
+                if signature in signatures:
+                    errors.append("duplicate observable input and training target")
+            if not errors:
+                accepted_record = record
+                break
+            final_errors = errors
+            duplicate_failure = "duplicate observable input and training target" in errors
+            if attempt == 2:
+                duplicates += int(duplicate_failure)
+                break
+            duplicate_retries += int(duplicate_failure)
+            retry_results = teacher.rewrite_batch(
+                [
+                    make_retry_prompt(
+                        scenario,
+                        draft,
+                        previous_surface,
+                        "; ".join(errors),
+                        attempt + 1,
+                    )
+                ]
             )
-        }
-        errors = validate_generated_record(record)
-        signature = semantic_signature(record)
-        if signature in signatures:
-            duplicates += 1
-            errors.append("duplicate observable input and training target")
-        if errors:
-            entry = {"scenario_id": scenario["scenario_id"], "errors": errors}
+            if len(retry_results) != 1:
+                raise ValueError("teacher retry returned a different number of rewrites than prompts")
+            rewrite = retry_results[0]
+
+        if accepted_record is None:
+            entry = {"scenario_id": scenario["scenario_id"], "errors": final_errors}
             rejected.append(entry)
             _append_jsonl(rejected_path, entry)
             continue
-        signatures.add(signature)
-        accepted.append(record)
-        _append_jsonl(accepted_path, record)
+        signatures.add(semantic_signature(accepted_record))
+        accepted.append(accepted_record)
+        _append_jsonl(accepted_path, accepted_record)
 
     elapsed = time.monotonic() - started
     complete = len(accepted) + len(rejected) == count
@@ -170,6 +201,7 @@ def build_teacher_dataset(
     manifest["last_batch"] = {
         "attempted": len(pending),
         "duplicates": duplicates,
+        "duplicate_retries": duplicate_retries,
         "elapsed_seconds": round(elapsed, 4),
     }
     return manifest
