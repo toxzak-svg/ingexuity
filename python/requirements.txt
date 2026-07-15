@@ -1,10 +1,10 @@
-# Python dependencies for IngExuity
+# Python dependencies for IngExuity model training
 # Install with: pip install -r python/requirements.txt
 
 # ---------------------------------------------------------------------------
-# Core inference and model loading
+# Core model loading
 # ---------------------------------------------------------------------------
-torch>=2.6.0
+torch>=2.6.0,<3.0.0
 transformers>=5.0.0,<6.0.0
 accelerate>=1.10.0,<2.0.0
 huggingface-hub>=0.30.0
@@ -20,11 +20,11 @@ peft>=0.18.0,<1.0.0
 datasets>=4.0.0,<5.0.0
 bitsandbytes>=0.48.0,<1.0.0
 
-# ---------------------------------------------------------------------------
-# Optional inference bindings and vision support
-# ---------------------------------------------------------------------------
-llama-cpp-python>=0.3.0
-torchvision>=0.21.0
-
-# Optional: For speech generation
+# Optional local inference bindings:
+# llama-cpp-python>=0.3.0
+#
+# Optional vision support:
+# torchvision>=0.21.0
+#
+# Optional speech generation:
 # TTS>=0.15.0
