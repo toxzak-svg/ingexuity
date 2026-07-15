@@ -5,6 +5,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from ingexuity_data.schema import normalize_probabilities, validate_record
+from ingexuity_data.scenarios import generate_scenarios
 
 
 def valid_record():
@@ -64,3 +65,26 @@ def test_rejects_unconfirmed_real_world_outcome():
 
 def test_valid_record_has_no_errors():
     assert validate_record(valid_record()) == []
+
+
+def test_scenarios_are_reproducible_and_balanced():
+    first = generate_scenarios(count=100, seed=42)
+    second = generate_scenarios(count=100, seed=42)
+    assert first == second
+    assert len({item["scenario_id"] for item in first}) == 100
+    assert {item["response_mode"] for item in first} == {
+        "presence",
+        "action",
+        "balanced",
+    }
+    assert any(item["real_world_status"] == "unknown" for item in first)
+    assert any(item["scenario_kind"] == "recovery" for item in first)
+
+
+def test_every_scenario_has_competing_predictions():
+    for scenario in generate_scenarios(count=20, seed=3):
+        assert len(scenario["conversation_outcomes"]) == 3
+        assert len(scenario["real_world_outcomes"]) == 3
+        assert scenario["actual_conversation"] in scenario["conversation_outcomes"]
+        if scenario["real_world_status"] != "unknown":
+            assert scenario["actual_real_world"] in scenario["real_world_outcomes"]
