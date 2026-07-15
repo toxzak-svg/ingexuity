@@ -6,6 +6,10 @@ data/
 # IDE
 .vscode/
 
+# Python caches
+__pycache__/
+*.py[cod]
+
 # Extraction scripts (not part of the core project)
 build_raw_dataset.py
 convert_dataset.py
