@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from ingexuity_data.schema import normalize_probabilities, validate_record
 from ingexuity_data.scenarios import generate_scenarios
 from ingexuity_data.render import TemplateRenderer
+from ingexuity_data.build import build_dataset
 
 
 def valid_record():
@@ -80,6 +81,11 @@ def test_scenarios_are_reproducible_and_balanced():
     }
     assert any(item["real_world_status"] == "unknown" for item in first)
     assert any(item["scenario_kind"] == "recovery" for item in first)
+    mode_counts = {
+        mode: sum(item["response_mode"] == mode for item in first)
+        for mode in {"presence", "action", "balanced"}
+    }
+    assert max(mode_counts.values()) - min(mode_counts.values()) <= 2
 
 
 def test_every_scenario_has_competing_predictions():
@@ -112,3 +118,24 @@ def test_renderer_creates_structured_training_target():
     assert envelope["assistant_response"] == record["assistant_response"]
     assert envelope["response_mode"] == record["response_mode"]
     assert envelope["predictions"] == record["predictions"]
+
+
+def test_build_writes_family_isolated_splits_and_manifest(tmp_path):
+    result = build_dataset(output_dir=tmp_path, count=100, seed=42)
+    train_families = set(result["split_families"]["train"])
+    eval_families = set(result["split_families"]["eval"])
+    test_families = set(result["split_families"]["test"])
+    assert train_families.isdisjoint(eval_families | test_families)
+    assert eval_families.isdisjoint(test_families)
+    assert result["accepted"] == 100
+    assert result["rejected"] == 0
+    assert (tmp_path / "manifest.json").is_file()
+    assert (tmp_path / "train.jsonl").is_file()
+
+
+def test_built_rows_are_model_ready_messages(tmp_path):
+    build_dataset(output_dir=tmp_path, count=30, seed=5)
+    rows = [json.loads(line) for line in (tmp_path / "train.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert rows
+    assert all(row["messages"][-1]["role"] == "assistant" for row in rows)
+    assert all(json.loads(row["messages"][-1]["content"])["predictions"] for row in rows)

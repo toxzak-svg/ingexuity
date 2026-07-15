@@ -130,6 +130,19 @@ FAMILIES: dict[str, FamilySpec] = {
 SCENARIO_KINDS = ("success", "ambiguous", "recovery", "contradiction", "override", "safety")
 MODES = ("presence", "action", "balanced")
 REAL_WORLD_STATUSES = ("unknown", "confirmed", "contradicted")
+MODE_CUES = {
+    "presence": "I am not ready to solve it yet; I need room to talk.",
+    "action": "I want a concrete next step now.",
+    "balanced": "Understand what is happening, then help me move forward.",
+}
+KIND_CUES = {
+    "success": "Your last read of the situation was accurate.",
+    "ambiguous": "I am still unsure what I need.",
+    "recovery": "Your last prediction missed what was actually blocking me.",
+    "contradiction": "What I am saying now conflicts with the earlier pattern.",
+    "override": "Follow the response style I am asking for in this message.",
+    "safety": "Do not claim certainty or act beyond what I have confirmed.",
+}
 
 
 def _override_mode(evidence: str, fallback: str) -> str:
@@ -151,15 +164,17 @@ def generate_scenarios(count: int, seed: int = 42) -> list[dict]:
     family_names = list(FAMILIES)
     scenarios = []
     for index in range(count):
-        family = family_names[index % len(family_names)]
+        family_index = index % len(family_names)
+        family_cycle = index // len(family_names)
+        family = family_names[family_index]
         spec = FAMILIES[family]
-        variant = (index // len(family_names)) % len(spec.evidence)
+        variant = family_cycle % len(spec.evidence)
         evidence = spec.evidence[variant]
-        kind = SCENARIO_KINDS[index % len(SCENARIO_KINDS)]
-        mode = MODES[index % len(MODES)]
+        kind = SCENARIO_KINDS[(family_cycle + family_index) % len(SCENARIO_KINDS)]
+        mode = MODES[(family_cycle + family_index) % len(MODES)]
         if family == "explicit_override":
             mode = _override_mode(evidence, mode)
-        status = REAL_WORLD_STATUSES[(index // len(MODES)) % len(REAL_WORLD_STATUSES)]
+        status = REAL_WORLD_STATUSES[(family_cycle + family_index) % len(REAL_WORLD_STATUSES)]
         conversation_outcomes = list(spec.conversation_outcomes)
         real_world_outcomes = list(spec.real_world_outcomes)
         actual_index = rng.randrange(3)
@@ -170,6 +185,10 @@ def generate_scenarios(count: int, seed: int = 42) -> list[dict]:
                 "family": family,
                 "scenario_kind": kind,
                 "evidence": evidence,
+                "context_signal": (
+                    f"I've noticed this {family_cycle + 2} times recently. "
+                    f"{MODE_CUES[mode]} {KIND_CUES[kind]}"
+                ),
                 "emotion": spec.emotion,
                 "need": spec.need,
                 "confidence": confidence,

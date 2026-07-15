@@ -184,6 +184,7 @@ class TemplateRenderer:
         self.random = random.Random(seed)
 
     def render(self, scenario: dict) -> dict:
+        user_content = f'{scenario["evidence"]} {scenario["context_signal"]}'
         conversation_predictions = _prediction_items(
             scenario["conversation_outcomes"],
             scenario["actual_conversation"],
@@ -214,12 +215,12 @@ class TemplateRenderer:
             "scenario_id": scenario["scenario_id"],
             "family": scenario["family"],
             "scenario_kind": scenario["scenario_kind"],
-            "conversation": [{"role": "user", "content": scenario["evidence"]}],
+            "conversation": [{"role": "user", "content": user_content}],
             "known_user_facts": [],
             "inferred_user_state": {
                 "emotion": scenario["emotion"],
                 "need": scenario["need"],
-                "evidence": [scenario["evidence"]],
+                "evidence": [scenario["evidence"], scenario["context_signal"]],
                 "confidence": scenario["confidence"],
             },
             "predictions": {
@@ -241,7 +242,7 @@ class TemplateRenderer:
         }
         record["messages"] = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": scenario["evidence"]},
+            {"role": "user", "content": user_content},
             {
                 "role": "assistant",
                 "content": json.dumps(_make_envelope(record), ensure_ascii=False, separators=(",", ":")),
