@@ -8,6 +8,8 @@ from ingexuity_data.schema import normalize_probabilities, validate_record
 from ingexuity_data.scenarios import generate_scenarios
 from ingexuity_data.render import TemplateRenderer
 from ingexuity_data.build import build_dataset
+from ingexuity_data.curriculum import CATEGORY_COUNTS, build_curriculum
+from collections import Counter
 
 
 def valid_record():
@@ -139,3 +141,24 @@ def test_built_rows_are_model_ready_messages(tmp_path):
     assert rows
     assert all(row["messages"][-1]["role"] == "assistant" for row in rows)
     assert all(json.loads(row["messages"][-1]["content"])["predictions"] for row in rows)
+
+
+def test_10k_curriculum_has_exact_approved_quotas():
+    scenarios = build_curriculum(count=10_000, seed=42)
+    assert Counter(row["category"] for row in scenarios) == CATEGORY_COUNTS
+    assert len({row["scenario_id"] for row in scenarios}) == 10_000
+
+
+def test_curriculum_has_observable_diversity_without_counter_language():
+    scenarios = build_curriculum(count=10_000, seed=42)
+    assert len({row["surface_seed"] for row in scenarios}) == 10_000
+    assert len({row["domain"] for row in scenarios}) >= 12
+    assert len({row["communication_style"] for row in scenarios}) >= 6
+    assert all("noticed this" not in row["context_signal"].lower() for row in scenarios)
+
+
+def test_curriculum_benchmark_is_deterministic_subset():
+    first = build_curriculum(count=200, seed=42)
+    second = build_curriculum(count=200, seed=42)
+    assert first == second
+    assert len(first) == 200
