@@ -25,7 +25,7 @@ pip install -r requirements.txt
 
 ### Recommended: validated synthetic Kaggle smoke
 
-Open [`train_weights.ipynb`](../models/trained_model/notebooks/train_weights.ipynb) in Kaggle, enable an NVIDIA GPU and Internet, add `HF_TOKEN` as a secret, and run all cells. The default synthetic mode builds 100 records and trains for one epoch.
+Open [`train_weights.ipynb`](../models/trained_model/notebooks/train_weights.ipynb) in Kaggle, enable an NVIDIA GPU and Internet, and run all cells. The public default model mirror does not require `HF_TOKEN`; gated sources still do. The default synthetic mode builds 100 records and trains for one epoch.
 
 For local dataset validation:
 

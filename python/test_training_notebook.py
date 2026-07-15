@@ -56,3 +56,9 @@ def test_notebook_installs_pascal_compatible_torch():
     assert '"torch==2.5.1"' in source
     assert '"torchvision==0.20.1"' in source
     assert '"https://download.pytorch.org/whl/cu121"' in source
+
+
+def test_notebook_can_use_public_llama_mirror_without_secret():
+    source = notebook_source()
+    assert 'model_name: str = "unsloth/Llama-3.2-1B-Instruct"' in source
+    assert "Public model mirror selected; continuing without HF_TOKEN." in source

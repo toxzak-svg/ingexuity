@@ -35,7 +35,7 @@ The template renderer is deliberately limited to pipeline smoke tests. The appro
 
 ## Run on Kaggle
 
-Open [`models/trained_model/notebooks/train_weights.ipynb`](../../models/trained_model/notebooks/train_weights.ipynb) in Kaggle and enable an NVIDIA GPU and Internet. Add `HF_TOKEN` as a Kaggle secret after accepting access to `meta-llama/Llama-3.2-1B-Instruct`.
+Open [`models/trained_model/notebooks/train_weights.ipynb`](../../models/trained_model/notebooks/train_weights.ipynb) in Kaggle and enable an NVIDIA GPU and Internet. The smoke defaults to the public `unsloth/Llama-3.2-1B-Instruct` mirror so API-launched Kaggle versions can run even when Kaggle does not attach account secrets. If `HF_TOKEN` is available, the notebook authenticates normally. The training manifest records the exact source identifier.
 
 The notebook defaults to `DATA_SOURCE = "synthetic"`. It clones the configured repository ref, builds 100 records, rejects invalid manifests or family overlap, uses the held-out evaluation-family file, and forces one training epoch. Output is written beneath:
 
