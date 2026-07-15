@@ -6,6 +6,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from ingexuity_data.schema import normalize_probabilities, validate_record
 from ingexuity_data.scenarios import generate_scenarios
+from ingexuity_data.render import TemplateRenderer
 
 
 def valid_record():
@@ -88,3 +89,26 @@ def test_every_scenario_has_competing_predictions():
         assert scenario["actual_conversation"] in scenario["conversation_outcomes"]
         if scenario["real_world_status"] != "unknown":
             assert scenario["actual_real_world"] in scenario["real_world_outcomes"]
+
+
+def test_renderer_keeps_internal_fields_out_of_visible_response():
+    scenario = generate_scenarios(1, seed=7)[0]
+    record = TemplateRenderer(seed=7).render(scenario)
+    assert record["assistant_response"]
+    assert "confidence" not in record["assistant_response"].lower()
+    assert "predictions" not in record["assistant_response"].lower()
+    assert validate_record(record) == []
+
+
+def test_renderer_creates_structured_training_target():
+    scenario = generate_scenarios(1, seed=9)[0]
+    record = TemplateRenderer(seed=9).render(scenario)
+    assert [message["role"] for message in record["messages"]] == [
+        "system",
+        "user",
+        "assistant",
+    ]
+    envelope = json.loads(record["messages"][-1]["content"])
+    assert envelope["assistant_response"] == record["assistant_response"]
+    assert envelope["response_mode"] == record["response_mode"]
+    assert envelope["predictions"] == record["predictions"]
