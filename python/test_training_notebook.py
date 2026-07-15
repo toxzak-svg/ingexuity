@@ -34,8 +34,18 @@ def test_notebook_stops_on_invalid_synthetic_manifest():
 
 def test_notebook_smoke_uses_one_epoch():
     source = notebook_source()
-    assert "SYNTHETIC_SMOKE_COUNT = 100" in source
+    assert "SYNTHETIC_PILOT_COUNT = 10_000" in source
     assert "config.num_epochs = 1.0" in source
+
+
+def test_notebook_has_10k_teacher_gate_and_structured_eval():
+    source = notebook_source()
+    assert 'SYNTHETIC_RENDERER = "teacher"' in source
+    assert '"--benchmark-count", str(TEACHER_BENCHMARK_COUNT)' in source
+    assert '"--require-scale-gate"' in source
+    assert "evaluate_prediction_model.py" in source
+    assert "base_structured_metrics.json" in source
+    assert "adapter_structured_metrics.json" in source
 
 
 def test_notebook_uses_held_out_synthetic_eval_file():
