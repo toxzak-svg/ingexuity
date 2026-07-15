@@ -49,3 +49,9 @@ def test_all_code_cells_compile():
     for index, cell in enumerate(notebook["cells"]):
         if cell.get("cell_type") == "code":
             compile("".join(cell.get("source", [])), f"notebook-cell-{index}", "exec")
+
+
+def test_notebook_installs_pascal_compatible_torch():
+    source = notebook_source()
+    assert '"torch==2.5.1"' in source
+    assert '"https://download.pytorch.org/whl/cu121"' in source
