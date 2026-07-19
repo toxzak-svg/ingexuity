@@ -1,6 +1,11 @@
 from pathlib import Path
 
-from scripts.publish_hf_cpu_space import DELETE_PATTERNS, publishable_paths, scrub_token
+from scripts.publish_hf_cpu_space import (
+    DELETE_PATTERNS,
+    ensure_space,
+    publishable_paths,
+    scrub_token,
+)
 
 
 def test_publish_manifest_excludes_models_caches_and_training_artifacts(tmp_path):
@@ -32,3 +37,21 @@ def test_token_scrubber_removes_secret():
 
 def test_publish_replaces_unreviewed_remote_source():
     assert DELETE_PATTERNS == ["*", "**/*"]
+
+
+def test_missing_space_is_created_as_a_docker_space():
+    class FakeApi:
+        def __init__(self):
+            self.calls = []
+
+        def create_repo(self, **kwargs):
+            self.calls.append(kwargs)
+
+    api = FakeApi()
+    ensure_space(api, "toxzak/ingexuity")
+    assert api.calls == [{
+        "repo_id": "toxzak/ingexuity",
+        "repo_type": "space",
+        "space_sdk": "docker",
+        "exist_ok": True,
+    }]

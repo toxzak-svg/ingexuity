@@ -54,6 +54,15 @@ def stage_files(source: Path, destination: Path, paths: Iterable[str]) -> None:
         shutil.copy2(src, dst)
 
 
+def ensure_space(api: object, repo_id: str) -> None:
+    api.create_repo(
+        repo_id=repo_id,
+        repo_type="space",
+        space_sdk="docker",
+        exist_ok=True,
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Publish the reviewed CPU Space source tree.")
     parser.add_argument("--repo-id", default="toxzak/ingexuity")
@@ -78,6 +87,7 @@ def main() -> int:
         stage_files(args.source, staged, paths)
         api = HfApi(token=token)
         try:
+            ensure_space(api, args.repo_id)
             commit = api.upload_folder(
                 repo_id=args.repo_id,
                 repo_type="space",
