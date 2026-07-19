@@ -38,7 +38,8 @@ export HF_TOKEN="..."
 Run the complete local suite, then publish the exact reviewed Git revision:
 
 ```bash
-python -m pytest spaces/hf_cpu/tests scripts/test_publish_hf_cpu_space.py \
+python -m pytest spaces/hf_cpu/tests scripts/test_benchmark_hf_cpu.py \
+  scripts/test_publish_hf_cpu_space.py \
   -q --basetemp=.pytest-tmp-hf-cpu-final -p no:cacheprovider
 python scripts/publish_hf_cpu_space.py \
   --repo-id toxzak/ingexuity \
@@ -58,6 +59,8 @@ python scripts/benchmark_hf_cpu.py \
   --base-url https://toxzak-ingexuity.hf.space \
   --out artifacts/hf_cpu_benchmark.json
 ```
+
+When `HF_TOKEN` is present, the benchmark sends it as a bearer header so the same command works against a private Space. Public Spaces require no token. The credential is redacted from captured errors and is never written to the report.
 
 The script performs one excluded warm-up, then three samples each for a 256-token short case and a 1,024-token long case. It records time to first token, wall time, completion tokens, decode tokens per second, finish reason, trimming, and continuation success. It stores no authorization token or prompt response text.
 

@@ -5,6 +5,7 @@ import argparse
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import statistics
 import time
@@ -31,6 +32,20 @@ class Sample:
     context_trimmed: bool | None = None
     continuation_ok: bool | None = None
     error: str | None = None
+
+
+def build_session(token: str | None = None) -> requests.Session:
+    session = requests.Session()
+    resolved_token = os.environ.get("HF_TOKEN", "") if token is None else token
+    if resolved_token:
+        session.headers.update({"Authorization": f"Bearer {resolved_token}"})
+    return session
+
+
+def scrub_session_secrets(text: str, session: requests.Session) -> str:
+    authorization = session.headers.get("Authorization", "")
+    token = authorization.removeprefix("Bearer ").strip()
+    return text.replace(token, "[REDACTED]") if token else text
 
 
 def parse_sse(response: requests.Response) -> Iterator[tuple[str, dict[str, Any]]]:
@@ -85,7 +100,8 @@ def run_stream(session: requests.Session, url: str, payload: dict[str, Any], cas
         )
         return sample, meta, "".join(text_parts)
     except Exception as exc:
-        return Sample(case_id=case_id, success=False, error=str(exc)[:500], wall_seconds=time.monotonic() - started), meta, "".join(text_parts)
+        error = scrub_session_secrets(str(exc), session)[:500]
+        return Sample(case_id=case_id, success=False, error=error, wall_seconds=time.monotonic() - started), meta, "".join(text_parts)
 
 
 def run_case(session: requests.Session, base_url: str, case: dict[str, Any]) -> Sample:
@@ -118,7 +134,7 @@ def main() -> int:
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
     base_url = args.base_url.rstrip("/")
-    session = requests.Session()
+    session = build_session()
 
     runtime = session.get(f"{base_url}/api/runtime", timeout=60)
     runtime.raise_for_status()
