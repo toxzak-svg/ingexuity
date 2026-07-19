@@ -6,13 +6,20 @@ import os
 MODEL_REPO = "bartowski/Llama-3.2-1B-Instruct-GGUF"
 MODEL_FILE = "Llama-3.2-1B-Instruct-Q4_K_M.gguf"
 MODEL_REVISION = "421677676671db8d33e216c039ed1b7e31b5d711"
-MODEL_PATH = "/opt/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf"
+MODEL_PATH = "/opt/models/model.gguf"
 LLAMA_CPP_REVISION = "aedb2a5e9ca3d4064148bbb919e0ddc0c1b70ab3"
 
 
 def _env_int(name: str, default: int) -> int:
     value = os.environ.get(name)
-    return default if value is None else int(value)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid integer value for environment variable {name!r}: {value!r}"
+        ) from exc
 
 
 @dataclass(frozen=True)
