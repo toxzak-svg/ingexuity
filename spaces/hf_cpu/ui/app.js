@@ -121,12 +121,7 @@ async function streamRequest(endpoint, payload, assistantNode) {
       }
     });
     if (!done) throw new Error("The stream ended without a completion record.");
-    continueButton.hidden = !done.can_continue;
-    if (done.finish_reason === "length") {
-      continueButton.hidden = !done.can_continue;
-    } else {
-      continueButton.hidden = true;
-    }
+    continueButton.hidden = !(done.finish_reason === "length" && done.can_continue);
     return done;
   } finally {
     activeController = null;

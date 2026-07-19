@@ -156,6 +156,7 @@ def create_app(
             return 503, {"error": "runtime_unavailable"}, None
         if not generation_lock.acquire(blocking=False):
             return 429, {"error": "generation_in_progress"}, None
+        setup_complete = False
         try:
             if continuation:
                 messages = payload.get("messages")
@@ -165,15 +166,18 @@ def create_app(
                 payload = dict(payload)
                 payload["messages"] = build_continuation_messages(messages, prior_text)
             request = normalize_request(payload, settings=settings, token_count=llama_client.count_messages)
+            setup_complete = True
         except MessageTooLarge as exc:
-            generation_lock.release()
             return 422, {"error": "message_too_large", "allowed_input_tokens": exc.allowed_tokens}, None
         except RuntimeUnavailable:
-            generation_lock.release()
             return 503, {"error": "runtime_unavailable"}, None
         except ValueError as exc:
-            generation_lock.release()
             return 400, {"error": "invalid_request", "message": str(exc)}, None
+        except Exception:
+            return 500, {"error": "internal_error"}, None
+        finally:
+            if not setup_complete:
+                generation_lock.release()
 
         request_id = uuid.uuid4().hex
         started = time.monotonic()

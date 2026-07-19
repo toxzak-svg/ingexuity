@@ -10,6 +10,8 @@ def test_dockerfile_is_cpu_only_pinned_and_static():
     assert "421677676671db8d33e216c039ed1b7e31b5d711" in source
     assert "-DBUILD_SHARED_LIBS=OFF" in source
     assert "--mount=type=secret,id=HF_TOKEN" in source
+    assert "-G Ninja" in source
+    assert "COPY --from=model-download /model/${MODEL_FILE} /opt/models/model.gguf" in source
 
 
 def test_space_card_declares_docker_port_and_llama_attribution():

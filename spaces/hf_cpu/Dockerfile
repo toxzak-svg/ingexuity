@@ -42,10 +42,11 @@ if not path.is_file() or path.stat().st_size < 100_000_000:
 PY
 
 FROM python:3.12-slim
+ARG MODEL_FILE=Llama-3.2-1B-Instruct-Q4_K_M.gguf
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libgomp1 && rm -rf /var/lib/apt/lists/* \
  && useradd -m -u 1000 user
 COPY --from=llama-build /src/build/bin/llama-server /usr/local/bin/llama-server
-COPY --from=model-download /model/Llama-3.2-1B-Instruct-Q4_K_M.gguf /opt/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf
+COPY --from=model-download /model/${MODEL_FILE} /opt/models/model.gguf
 WORKDIR /home/user/app
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
