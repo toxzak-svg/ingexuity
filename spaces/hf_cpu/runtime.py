@@ -54,12 +54,16 @@ class RuntimeManager:
                 return
             self.state = "loading"
             self.exit_code = None
-            self.process = subprocess.Popen(
-                build_llama_server_command(self.settings),
+            command = build_llama_server_command(self.settings)
+            # The executable and flags are constants or validated integers; no shell is involved.
+            self.process = subprocess.Popen(  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
+                command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                shell=False,
+                close_fds=True,
             )
             threading.Thread(target=self._capture_logs, daemon=True).start()
 
