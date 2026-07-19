@@ -1,11 +1,18 @@
 # syntax=docker/dockerfile:1.7
 FROM debian:bookworm AS llama-build
 ARG LLAMA_CPP_REVISION=aedb2a5e9ca3d4064148bbb919e0ddc0c1b70ab3
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates cmake g++ git libgomp1 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential \
+      ca-certificates \
+      cmake \
+      git \
+      libgomp1 \
+      ninja-build \
+ && rm -rf /var/lib/apt/lists/*
 RUN git clone https://github.com/ggml-org/llama.cpp /src/llama.cpp \
  && cd /src/llama.cpp \
  && git checkout "$LLAMA_CPP_REVISION"
-RUN cmake -S /src/llama.cpp -B /src/build \
+RUN cmake -G Ninja -S /src/llama.cpp -B /src/build \
       -DCMAKE_BUILD_TYPE=Release \
       -DGGML_OPENMP=ON \
       -DGGML_NATIVE=OFF \
