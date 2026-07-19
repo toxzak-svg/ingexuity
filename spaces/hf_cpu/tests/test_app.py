@@ -118,3 +118,29 @@ def test_runtime_endpoint_is_truthful_and_prompt_free():
     assert data["default_max_new_tokens"] == 1024
     assert data["maximum_max_new_tokens"] == 2048
     assert "messages" not in data
+
+
+def test_unexpected_setup_error_releases_generation_slot():
+    class FlakyCountLlama(FakeLlama):
+        def __init__(self):
+            super().__init__()
+            self.count_calls = 0
+
+        def count_messages(self, messages):
+            self.count_calls += 1
+            if self.count_calls == 1:
+                raise RuntimeError("unexpected tokenizer bug")
+            return super().count_messages(messages)
+
+    fake = FlakyCountLlama()
+    fake.chunks = [{"choices": [{"delta": {"content": "Recovered"}, "finish_reason": "stop"}]}]
+    app = make_app(fake)
+    payload = {"messages": [{"role": "user", "content": "Hello"}], "stream": True}
+
+    first = request(app, "/api/chat", payload)
+    second = request(app, "/api/chat", payload)
+
+    assert first["status"] == 500
+    assert json.loads(first["body"])["error"] == "internal_error"
+    assert second["status"] == 200
+    assert '"text":"Recovered"' in second["text"]
