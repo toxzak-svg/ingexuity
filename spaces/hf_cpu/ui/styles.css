@@ -1,0 +1,38 @@
+:root {
+  color-scheme: dark;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  background: #090b10;
+  color: #edf0f7;
+}
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; background: radial-gradient(circle at 20% 0%, #202746 0, transparent 36rem), #090b10; }
+button, textarea, select { font: inherit; }
+.shell { width: min(920px, calc(100% - 2rem)); margin: 0 auto; padding: 2rem 0; }
+header { display: flex; gap: 1rem; justify-content: space-between; align-items: start; margin-bottom: 1.5rem; }
+.eyebrow { margin: 0; letter-spacing: .22em; font-size: .72rem; color: #aeb7d6; }
+h1 { margin: .35rem 0 0; font-size: clamp(1.55rem, 4vw, 2.7rem); }
+.runtime { border: 1px solid #343a52; border-radius: 999px; padding: .55rem .8rem; font-size: .8rem; white-space: nowrap; background: #111521cc; }
+.runtime[data-state="ready"] { border-color: #397663; }
+.conversation { display: grid; gap: .85rem; min-height: 45vh; }
+.message { border: 1px solid #252b3d; border-radius: 1rem; padding: 1rem; background: #10131bcc; box-shadow: 0 12px 35px #0005; }
+.message.user { margin-left: 12%; background: #171d2cdd; }
+.message.assistant { margin-right: 7%; }
+.message strong { display: block; margin-bottom: .55rem; color: #b9c4ef; }
+.message pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.55; }
+.notice { color: #e8c77f; font-size: .9rem; }
+.composer { margin-top: 1.25rem; display: grid; gap: .55rem; }
+textarea { width: 100%; resize: vertical; min-height: 7rem; border-radius: .9rem; border: 1px solid #343a52; padding: .9rem; color: inherit; background: #0f121a; }
+.controls { display: flex; flex-wrap: wrap; gap: .65rem; align-items: center; }
+select, button { border: 1px solid #3a425f; border-radius: .65rem; padding: .58rem .8rem; color: inherit; background: #171c29; }
+button { cursor: pointer; }
+button:hover:not(:disabled) { background: #242b3e; }
+button:disabled { opacity: .5; cursor: not-allowed; }
+#sendButton { margin-left: auto; background: #525fc4; border-color: #6876e4; }
+#continueButton { background: #325b51; border-color: #4a8878; }
+footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .75rem; color: #8f97ad; font-size: .78rem; margin-top: 1rem; }
+@media (max-width: 620px) {
+  header { display: grid; }
+  .runtime { justify-self: start; }
+  .message.user, .message.assistant { margin: 0; }
+  #sendButton { margin-left: 0; }
+}

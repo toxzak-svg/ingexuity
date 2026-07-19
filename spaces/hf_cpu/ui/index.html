@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IngExuity CPU</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div>
+        <p class="eyebrow">INGEXUITY</p>
+        <h1>CPU conversation fallback</h1>
+      </div>
+      <div id="runtimeStatus" class="runtime" aria-live="polite">Checking runtime…</div>
+    </header>
+
+    <section id="conversation" class="conversation" aria-live="polite" aria-label="Conversation"></section>
+
+    <p id="contextNotice" class="notice" hidden>Older turns were left out to fit this response safely.</p>
+
+    <form id="composer" class="composer">
+      <label for="prompt">Message</label>
+      <textarea id="prompt" rows="5" required placeholder="Ask IngExuity something…"></textarea>
+      <div class="controls">
+        <label for="responseLength">Response length</label>
+        <select id="responseLength">
+          <option value="256">256</option>
+          <option value="512">512</option>
+          <option value="1024" selected>1024</option>
+          <option value="2048">2048</option>
+        </select>
+        <button id="sendButton" type="submit">Send</button>
+        <button id="cancelButton" type="button" hidden>Cancel</button>
+        <button id="continueButton" type="button" hidden>Continue</button>
+      </div>
+    </form>
+
+    <footer>
+      <span>CPU Basic · 2 threads · 4,096-token context · up to 2,048 output tokens</span>
+      <span>Built with Llama</span>
+    </footer>
+  </main>
+  <script src="/app.js" defer></script>
+</body>
+</html>
