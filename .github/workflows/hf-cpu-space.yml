@@ -48,7 +48,16 @@ jobs:
       - name: Reject whitespace errors
         run: git diff --check
       - name: Build CPU-only Space image
-        run: docker build --tag ingexuity-hf-cpu:test spaces/hf_cpu
+        shell: bash
+        run: |
+          set -o pipefail
+          docker build --progress=plain --tag ingexuity-hf-cpu:test spaces/hf_cpu 2>&1 | tee /tmp/hf-cpu-docker-build.log
+      - name: Preserve failed Docker build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hf-cpu-docker-build-${{ github.sha }}
+          path: /tmp/hf-cpu-docker-build.log
       - name: Smoke the warmed runtime and streamed API
         shell: bash
         run: |
