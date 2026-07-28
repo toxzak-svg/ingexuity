@@ -5,6 +5,7 @@ from spaces.hf_cpu.generation import (
     MessageTooLarge,
     build_continuation_messages,
     classify_finish_reason,
+    conservative_message_token_upper_bound,
     normalize_request,
     parse_openai_sse,
 )
@@ -69,6 +70,38 @@ def test_single_newest_message_over_budget_is_explicit():
             token_count=word_counter,
         )
     assert exc.value.allowed_tokens == 70
+
+
+def test_conservative_fast_path_skips_exact_tokenizer_for_small_prompts():
+    calls = 0
+
+    def exact_counter(messages):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("exact tokenizer should not run")
+
+    request = normalize_request(
+        {"messages": [{"role": "user", "content": "Hello"}]},
+        token_count=exact_counter,
+        token_upper_bound=conservative_message_token_upper_bound,
+    )
+    assert request.context_trimmed is False
+    assert calls == 0
+
+
+def test_exact_token_counts_are_memoized_within_a_request():
+    calls = 0
+
+    def exact_counter(messages):
+        nonlocal calls
+        calls += 1
+        return 10
+
+    normalize_request(
+        {"messages": [{"role": "user", "content": "Hello"}]},
+        token_count=exact_counter,
+    )
+    assert calls == 1
 
 
 def test_continuation_adds_a_non_repeating_instruction():
