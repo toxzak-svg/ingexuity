@@ -37,6 +37,16 @@ def estimate_message_tokens(messages: Sequence[Mapping[str, str]]) -> int:
     return 3 + sum(4 + _estimate_text_tokens(message["content"]) for message in messages)
 
 
+def conservative_message_token_upper_bound(messages: Sequence[Mapping[str, str]]) -> int:
+    """Return a deliberately loose bound that is safe without calling the tokenizer.
+
+    A tokenizer cannot emit more ordinary tokens than there are UTF-8 bytes in the
+    message text. The per-message allowance and the runtime's separate template
+    reserve cover role markers and chat-template framing.
+    """
+    return 3 + sum(8 + len(message["content"].encode("utf-8")) for message in messages)
+
+
 def _validate_messages(raw: object) -> list[dict[str, str]]:
     if not isinstance(raw, list) or not raw:
         raise ValueError("messages must be a non-empty array")
@@ -73,6 +83,7 @@ def normalize_request(
     payload: Mapping[str, object],
     settings: Settings | None = None,
     token_count: Callable[[Sequence[Mapping[str, str]]], int] | None = None,
+    token_upper_bound: Callable[[Sequence[Mapping[str, str]]], int] | None = None,
 ) -> GenerationRequest:
     settings = settings or Settings()
     counter = token_count or estimate_message_tokens
@@ -87,14 +98,37 @@ def normalize_request(
         raise ValueError("stream must be true")
 
     input_budget = settings.context_tokens - max_new_tokens - settings.reserve_tokens
-    newest_user_index = max(index for index, message in enumerate(messages) if message["role"] == "user")
-    newest_user = [messages[newest_user_index]]
-    if counter(newest_user) > input_budget:
+    retained = list(messages)
+
+    # Most chat requests are far below the context ceiling. In that common case,
+    # a byte-level upper bound proves the request fits and avoids repeated local
+    # HTTP calls to llama-server's template and tokenizer endpoints.
+    if token_upper_bound is not None and token_upper_bound(retained) <= input_budget:
+        return GenerationRequest(
+            messages=retained,
+            max_new_tokens=max_new_tokens,
+            context_trimmed=False,
+            input_tokens=estimate_message_tokens(retained),
+            input_budget=input_budget,
+        )
+
+    count_cache: dict[tuple[tuple[str, str], ...], int] = {}
+
+    def exact_count(candidate: Sequence[Mapping[str, str]]) -> int:
+        key = tuple((message["role"], message["content"]) for message in candidate)
+        value = count_cache.get(key)
+        if value is None:
+            value = counter(candidate)
+            count_cache[key] = value
+        return value
+
+    newest_user_index = max(index for index, message in enumerate(retained) if message["role"] == "user")
+    newest_user = [retained[newest_user_index]]
+    if exact_count(newest_user) > input_budget:
         raise MessageTooLarge(input_budget)
 
-    retained = list(messages)
     context_trimmed = False
-    while counter(retained) > input_budget:
+    while exact_count(retained) > input_budget:
         newest_user_index = max(index for index, message in enumerate(retained) if message["role"] == "user")
         if not _drop_oldest_turn(retained, newest_user_index):
             raise MessageTooLarge(input_budget)
@@ -104,7 +138,7 @@ def normalize_request(
         messages=retained,
         max_new_tokens=max_new_tokens,
         context_trimmed=context_trimmed,
-        input_tokens=counter(retained),
+        input_tokens=exact_count(retained),
         input_budget=input_budget,
     )
 
