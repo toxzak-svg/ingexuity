@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import lru_cache
 from http import HTTPStatus
 import json
 import mimetypes
@@ -9,8 +10,9 @@ import time
 import uuid
 from typing import Callable, Iterable, Iterator, Mapping
 from urllib.parse import unquote
-from wsgiref.simple_server import WSGIServer, WSGIRequestHandler, make_server
+
 from socketserver import ThreadingMixIn
+from wsgiref.simple_server import WSGIServer, WSGIRequestHandler, make_server
 
 import requests
 
@@ -20,6 +22,7 @@ try:
         MessageTooLarge,
         build_continuation_messages,
         classify_finish_reason,
+        conservative_message_token_upper_bound,
         extract_chunk,
         normalize_request,
         parse_openai_sse,
@@ -32,6 +35,7 @@ except ImportError:  # Direct execution inside the Space image.
         MessageTooLarge,
         build_continuation_messages,
         classify_finish_reason,
+        conservative_message_token_upper_bound,
         extract_chunk,
         normalize_request,
         parse_openai_sse,
@@ -58,6 +62,12 @@ class LlamaClient:
             return False
 
     def count_messages(self, messages: list[dict[str, str]]) -> int:
+        key = tuple((message["role"], message["content"]) for message in messages)
+        return self._count_message_key(key)
+
+    @lru_cache(maxsize=32)
+    def _count_message_key(self, key: tuple[tuple[str, str], ...]) -> int:
+        messages = [{"role": role, "content": content} for role, content in key]
         try:
             templated = self.session.post(
                 f"{self.base_url}/apply-template",
@@ -152,7 +162,7 @@ def create_app(
     def stream_chat(payload: dict[str, object], continuation: bool) -> tuple[int, dict[str, object] | None, Iterable[bytes] | None]:
         nonlocal latest_timing
         snapshot = runtime_snapshot()
-        if snapshot.get("state") != "ready" or not llama_client.is_ready():
+        if snapshot.get("state") != "ready":
             return 503, {"error": "runtime_unavailable"}, None
         if not generation_lock.acquire(blocking=False):
             return 429, {"error": "generation_in_progress"}, None
@@ -165,7 +175,12 @@ def create_app(
                     raise ValueError("messages must be an array")
                 payload = dict(payload)
                 payload["messages"] = build_continuation_messages(messages, prior_text)
-            request = normalize_request(payload, settings=settings, token_count=llama_client.count_messages)
+            request = normalize_request(
+                payload,
+                settings=settings,
+                token_count=llama_client.count_messages,
+                token_upper_bound=conservative_message_token_upper_bound,
+            )
             setup_complete = True
         except MessageTooLarge as exc:
             return 422, {"error": "message_too_large", "allowed_input_tokens": exc.allowed_tokens}, None

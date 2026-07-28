@@ -22,6 +22,7 @@ def build_llama_server_command(settings: Settings) -> list[str]:
         "--host", "127.0.0.1",
         "--port", str(settings.llama_port),
         "--threads", str(settings.threads),
+        "--threads-batch", str(settings.threads),
         "--ctx-size", str(settings.context_tokens),
         "--parallel", "1",
         "--cont-batching",

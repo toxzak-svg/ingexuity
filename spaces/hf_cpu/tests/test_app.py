@@ -135,7 +135,7 @@ def test_unexpected_setup_error_releases_generation_slot():
     fake = FlakyCountLlama()
     fake.chunks = [{"choices": [{"delta": {"content": "Recovered"}, "finish_reason": "stop"}]}]
     app = make_app(fake)
-    payload = {"messages": [{"role": "user", "content": "Hello"}], "stream": True}
+    payload = {"messages": [{"role": "user", "content": "x" * 3000}], "stream": True}
 
     first = request(app, "/api/chat", payload)
     second = request(app, "/api/chat", payload)
