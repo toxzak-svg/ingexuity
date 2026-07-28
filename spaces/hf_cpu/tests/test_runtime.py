@@ -7,6 +7,7 @@ from spaces.hf_cpu.runtime import build_llama_server_command
 def test_cpu_basic_command_uses_two_threads_and_one_slot():
     command = build_llama_server_command(Settings())
     assert command[command.index("--threads") + 1] == "2"
+    assert command[command.index("--threads-batch") + 1] == "2"
     assert command[command.index("--ctx-size") + 1] == "4096"
     assert command[command.index("--parallel") + 1] == "1"
     assert "--flash-attn" not in command
